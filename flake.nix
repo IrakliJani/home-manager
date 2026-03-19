@@ -13,16 +13,24 @@
 
   outputs = { nixpkgs, home-manager, nixvim, ... }:
     let
-      system = "aarch64-darwin";
-      pkgs = nixpkgs.legacyPackages.${system};
-    in {
-      homeConfigurations."irakli" = home-manager.lib.homeManagerConfiguration {
-        inherit pkgs;
+      mkHome = system:
+        let
+          platformModule = {
+            "aarch64-darwin" = ./modules/platform/darwin.nix;
+            "x86_64-linux" = ./modules/platform/linux.nix;
+          }.${system} or (throw "Unsupported platform: ${system}");
+        in
+        home-manager.lib.homeManagerConfiguration {
+          pkgs = nixpkgs.legacyPackages.${system};
 
-        modules = [
-          nixvim.homeModules.nixvim
-          ./home.nix
-        ];
-      };
+          modules = [
+            nixvim.homeModules.nixvim
+            ./home.nix
+            platformModule
+          ];
+        };
+    in {
+      homeConfigurations."irakli@darwin" = mkHome "aarch64-darwin";
+      homeConfigurations."irakli@linux" = mkHome "x86_64-linux";
     };
 }

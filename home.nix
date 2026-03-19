@@ -12,7 +12,7 @@
   ];
 
   home.username = "irakli";
-  home.homeDirectory = "/Users/irakli";
+  # home.homeDirectory set in modules/platform/{darwin,linux}.nix
   home.stateVersion = "25.05";
 
   home.sessionPath = [

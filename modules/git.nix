@@ -8,7 +8,7 @@
       key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA/48Asjhf6j0n2pUZjb2NX9klFv/Z5VBpUq+lFUkSPX";
       signByDefault = true;
       format = "ssh";
-      signer = "/Applications/1Password.app/Contents/MacOS/op-ssh-sign";
+      # signer set in modules/platform/darwin.nix
     };
 
     settings = {
