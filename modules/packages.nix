@@ -27,5 +27,6 @@
     # runtimes
     nodejs
     bun
+    python
   ];
 }
