@@ -12,6 +12,7 @@
 
     # system
     htop
+    btop
 
     # git
     git-lfs
@@ -27,6 +28,6 @@
     # runtimes
     nodejs
     bun
-    python
+    python3
   ];
 }
