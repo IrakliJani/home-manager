@@ -1,24 +1,25 @@
-{ ... }:
+{ config, ... }:
 
 {
   programs.zsh = {
     enable = true;
 
-    oh-my-zsh = {
-      enable = true;
-      plugins = [ "git" "sudo" ];
-      theme = "simple";
-    };
+    dotDir = "${config.xdg.configHome}/zsh";
 
     shellAliases = {
-      l = "eza -lbF --git";
       gs = "git status";
     };
 
     history = {
       append = true;
-      size = 100000;
+      path = "${config.xdg.dataHome}/zsh/zsh_history";
+      expireDuplicatesFirst = true;
+      extended = false;
+      ignoreDups = true;
+      ignoreSpace = true;
+      share = true;
       save = 100000;
+      size = 100000;
     };
 
     syntaxHighlighting.enable = true;
