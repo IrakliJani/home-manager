@@ -86,7 +86,7 @@
               type = "text";
               style = "plain";
               foreground = "p:closer";
-              template = "󰇘 ";
+              template = "󰇝 ";
             }
             {
               type = "status";
