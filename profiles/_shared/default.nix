@@ -2,19 +2,18 @@
 
 {
   imports = [
-    ./modules/packages.nix
-    ./modules/git.nix
-    ./modules/themes/catppuccin.nix
-    ./modules/shell/oh-my-posh.nix
-    ./modules/shell/zsh.nix
-    ./modules/shell/tmux.nix
-    ./modules/shell/direnv.nix
-    ./modules/shell/tools.nix
-    ./modules/editor/nixvim
+    ../../modules/packages.nix
+    ../../modules/git.nix
+    ../../modules/shell/oh-my-posh.nix
+    ../../modules/shell/zsh.nix
+    ../../modules/shell/tmux.nix
+    ../../modules/shell/direnv.nix
+    ../../modules/shell/tools.nix
+    ../../modules/editor/nixvim
   ];
 
-  home.username = "irakli";
-  # home.homeDirectory set in modules/platform/{darwin,linux}.nix
+  # home.username is set by profile modules (e.g. profiles/irakli, profiles/claw)
+  # home.homeDirectory is set by modules/platform/{darwin,linux}.nix
   home.stateVersion = "25.05";
 
   home.sessionPath = [
@@ -30,10 +29,7 @@
     stateHome = "${config.home.homeDirectory}/.local/state";
   };
 
-  themes.catppuccin = {
-    enable = true;
-    flavor = "mocha";
-  };
-
   programs.home-manager.enable = true;
+
+  home.file.".hushlogin".text = "";
 }

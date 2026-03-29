@@ -2,11 +2,6 @@
   description = "Home Manager configuration of irakli";
 
   inputs = {
-    catppuccin = {
-      url = "github:catppuccin/nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
 
     home-manager.url = "github:nix-community/home-manager/master";
@@ -21,33 +16,99 @@
       nixpkgs,
       home-manager,
       nixvim,
-      catppuccin,
       ...
     }:
     let
-      mkHome =
+      defaultProfile = "irakli";
+
+      profileModules = {
+        "${defaultProfile}" = ./profiles/irakli;
+        claw = ./profiles/claw;
+      };
+
+      mkProfileModule = profile: profileModules.${profile} or (throw "Unsupported profile: ${profile}");
+
+      platforms = {
+        darwin = "aarch64-darwin";
+        linux = "x86_64-linux";
+      };
+
+      platformNames = builtins.attrNames platforms;
+      profileNames = builtins.attrNames profileModules;
+
+      mkPlatformModule =
         system:
-        let
-          platformModule =
-            {
-              "aarch64-darwin" = ./modules/platform/darwin.nix;
-              "x86_64-linux" = ./modules/platform/linux.nix;
-            }
-            .${system} or (throw "Unsupported platform: ${system}");
-        in
+        {
+          "aarch64-darwin" = ./modules/platform/darwin.nix;
+          "x86_64-linux" = ./modules/platform/linux.nix;
+        }
+        .${system} or (throw "Unsupported platform: ${system}");
+
+      mkHomeModule =
+        {
+          system,
+          profile ? defaultProfile,
+        }:
+        {
+          imports = [
+            nixvim.homeModules.nixvim
+            (mkProfileModule profile)
+            (mkPlatformModule system)
+          ];
+        };
+
+      mkHome =
+        {
+          system,
+          profile ? defaultProfile,
+        }:
         home-manager.lib.homeManagerConfiguration {
           pkgs = nixpkgs.legacyPackages.${system};
 
           modules = [
-            catppuccin.homeModules.catppuccin
-            nixvim.homeModules.nixvim
-            ./home.nix
-            platformModule
+            (mkHomeModule {
+              inherit system profile;
+            })
           ];
         };
     in
     {
-      homeConfigurations."irakli@darwin" = mkHome "aarch64-darwin";
-      homeConfigurations."irakli@linux" = mkHome "x86_64-linux";
+      homeModules = builtins.listToAttrs (
+        builtins.map (platform: {
+          name = platform;
+          value =
+            {
+              profile ? defaultProfile,
+            }:
+            mkHomeModule {
+              system = platforms.${platform};
+              inherit profile;
+            };
+        }) platformNames
+      );
+
+      homeConfigurations =
+        (builtins.listToAttrs (
+          builtins.map (platform: {
+            name = platform;
+            value = mkHome {
+              system = platforms.${platform};
+            };
+          }) platformNames
+        ))
+        // (builtins.listToAttrs (
+          builtins.concatLists (
+            builtins.map (
+              profile:
+              builtins.map (platform: {
+                name = "${profile}@${platform}";
+                value = mkHome {
+                  system = platforms.${platform};
+                  inherit profile;
+                };
+              }) platformNames
+            ) profileNames
+          )
+        ));
     };
 }
