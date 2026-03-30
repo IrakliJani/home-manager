@@ -40,7 +40,7 @@
               style = "plain";
               foreground = "p:pink";
               template = "{{ .Path }} ";
-              options = {
+              properties = {
                 folder_icon = "....";
                 home_icon = "~";
                 style = "agnoster_short";
@@ -52,7 +52,7 @@
               style = "plain";
               foreground = "p:lavender";
               template = "{{ .HEAD }} ";
-              options = {
+              properties = {
                 branch_icon = " ";
                 cherry_pick_icon = "cherry-pick ";
                 commit_icon = "@ ";
@@ -76,7 +76,7 @@
               style = "plain";
               foreground = "p:pink";
               template = "{{ .FormattedMs }} ";
-              options = {
+              properties = {
                 always_enabled = true;
                 threshold = 0;
                 style = "roundrock";
@@ -96,7 +96,7 @@
                 "{{ if gt .Code 0 }}#F38BA8{{ end }}"
               ];
               template = "{{ .Code }} ";
-              options = {
+              properties = {
                 always_enabled = true;
               };
             }
@@ -115,7 +115,7 @@
                 "{{ if gt .Code 0 }}#F38BA8{{ end }}"
               ];
               template = "";
-              options = {
+              properties = {
                 always_enabled = true;
               };
             }
