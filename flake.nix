@@ -9,6 +9,9 @@
 
     nixvim.url = "github:nix-community/nixvim";
     nixvim.inputs.nixpkgs.follows = "nixpkgs";
+
+    llm-agents.url = "github:numtide/llm-agents.nix";
+    llm-agents.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -16,6 +19,7 @@
       nixpkgs,
       home-manager,
       nixvim,
+      llm-agents,
       ...
     }:
     let
@@ -63,7 +67,10 @@
           profile ? defaultProfile,
         }:
         home-manager.lib.homeManagerConfiguration {
-          pkgs = nixpkgs.legacyPackages.${system};
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ llm-agents.overlays.default ];
+          };
 
           modules = [
             (mkHomeModule {

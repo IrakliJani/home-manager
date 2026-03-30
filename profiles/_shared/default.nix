@@ -18,7 +18,6 @@
 
   home.sessionPath = [
     "$HOME/.local/bin"
-    "$HOME/.claude/local"
   ];
 
   xdg = {
