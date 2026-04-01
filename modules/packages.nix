@@ -22,7 +22,6 @@
     # runtimes
     nodejs
     bun
-    deno
     python3
   ];
 }
