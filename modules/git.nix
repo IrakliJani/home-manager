@@ -8,6 +8,7 @@
 
     settings = {
       merge.conflictStyle = "zdiff3";
+      diff.ignoreWhitespace = "all";
     };
   };
 }
