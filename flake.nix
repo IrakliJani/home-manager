@@ -61,16 +61,33 @@
           ];
         };
 
+      unfreePackages = [
+        "gitbutler"
+      ];
+
+      overlays = [
+        llm-agents.overlays.default
+
+        # TODO: remove once direnv 2.37.1 checkPhase hang on darwin is fixed upstream
+        (_: prev: {
+          direnv = prev.direnv.overrideAttrs (_: { doCheck = false; });
+        })
+      ];
+
+      mkPkgs =
+        system:
+        import nixpkgs {
+          inherit system overlays;
+          config.allowUnfreePredicate = pkg: builtins.elem (nixpkgs.lib.getName pkg) unfreePackages;
+        };
+
       mkHome =
         {
           system,
           profile ? defaultProfile,
         }:
         home-manager.lib.homeManagerConfiguration {
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ llm-agents.overlays.default ];
-          };
+          pkgs = mkPkgs system;
 
           modules = [
             (mkHomeModule {

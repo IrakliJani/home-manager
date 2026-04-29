@@ -10,6 +10,9 @@
     nixd
     nixfmt
 
+    # git stuff
+    gitbutler
+
     # AI coding agent harnesses (from numtide/llm-agents.nix)
     llm-agents.pi
     llm-agents.opencode
