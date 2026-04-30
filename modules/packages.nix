@@ -11,7 +11,7 @@
     nixfmt
 
     # git stuff
-    gitbutler
+    llm-agents.but
 
     # AI coding agent harnesses (from numtide/llm-agents.nix)
     llm-agents.pi

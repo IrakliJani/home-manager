@@ -61,10 +61,6 @@
           ];
         };
 
-      unfreePackages = [
-        "gitbutler"
-      ];
-
       overlays = [
         llm-agents.overlays.default
 
@@ -78,7 +74,6 @@
         system:
         import nixpkgs {
           inherit system overlays;
-          config.allowUnfreePredicate = pkg: builtins.elem (nixpkgs.lib.getName pkg) unfreePackages;
         };
 
       mkHome =
