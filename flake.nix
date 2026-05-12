@@ -68,11 +68,6 @@
 
       overlays = [
         llm-agents.overlays.default
-
-        # TODO: remove once direnv 2.37.1 checkPhase hang on darwin is fixed upstream
-        (_: prev: {
-          direnv = prev.direnv.overrideAttrs (_: { doCheck = false; });
-        })
       ];
 
       mkPkgs =
