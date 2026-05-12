@@ -13,12 +13,13 @@
     git = true;
   };
 
-  programs.delta = {
+  programs.hunk = {
     enable = true;
     enableGitIntegration = true;
-    options = {
-      navigate = true;
-      dark = true;
+    settings = {
+      theme = "graphite";
+      mode = "split";
+      line_numbers = true;
     };
   };
 }
