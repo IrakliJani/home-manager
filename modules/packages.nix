@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ pkgs, lib, ... }:
 
 {
   home.packages = with pkgs; [
@@ -17,7 +17,9 @@
     llm-agents.pi
     llm-agents.opencode
     llm-agents.claude-code
-
+  ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+    ungoogled-chromium
+  ] ++ [
     # fonts
     nerd-fonts.victor-mono
     nerd-fonts.jetbrains-mono

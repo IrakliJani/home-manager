@@ -70,10 +70,15 @@
         llm-agents.overlays.default
       ];
 
+      unfreePackages = [
+        "ungoogled-chromium"
+      ];
+
       mkPkgs =
         system:
         import nixpkgs {
           inherit system overlays;
+          config.allowUnfreePredicate = pkg: builtins.elem (nixpkgs.lib.getName pkg) unfreePackages;
         };
 
       mkHome =
