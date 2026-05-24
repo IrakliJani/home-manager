@@ -7,6 +7,11 @@
   programs.ripgrep.enable = true;
   programs.fd.enable = true;
 
+  programs.nix-index = {
+    enable = true;
+    enableZshIntegration = true;
+  };
+
   programs.eza = {
     enable = true;
     enableZshIntegration = true;

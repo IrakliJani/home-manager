@@ -1,8 +1,11 @@
-{ config, ... }:
+{ config, pkgs, ... }:
 
 {
+  home.packages = [ pkgs.zsh-completions ];
+
   programs.zsh = {
     enable = true;
+    enableCompletion = true;
 
     dotDir = "${config.xdg.configHome}/zsh";
 

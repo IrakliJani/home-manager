@@ -2,6 +2,7 @@
 
 {
   imports = [
+    ../../modules/nix.nix
     ../../modules/packages.nix
     ../../modules/git.nix
     ../../modules/shell/oh-my-posh.nix

@@ -1,32 +1,36 @@
 { pkgs, lib, ... }:
 
 {
-  home.packages = with pkgs; [
-    # networking
-    curl
-    wget
+  home.packages =
+    with pkgs;
+    [
+      # networking
+      curl
+      wget
 
-    # nix tooling
-    nixd
-    nixfmt
+      # nix tooling
+      nixd
+      nixfmt
 
-    # git stuff
-    llm-agents.but
+      # git stuff
+      llm-agents.but
 
-    # AI coding agent harnesses (from numtide/llm-agents.nix)
-    llm-agents.pi
-    llm-agents.opencode
-    llm-agents.claude-code
-  ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-    ungoogled-chromium
-  ] ++ [
-    # fonts
-    nerd-fonts.victor-mono
-    nerd-fonts.jetbrains-mono
+      # AI coding agent harnesses (from numtide/llm-agents.nix)
+      llm-agents.pi
+      llm-agents.opencode
+      llm-agents.claude-code
+    ]
+    ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+      apfel-llm
+    ]
+    ++ [
+      # fonts
+      nerd-fonts.victor-mono
+      nerd-fonts.jetbrains-mono
 
-    # runtimes
-    nodejs
-    bun
-    python3
-  ];
+      # runtimes
+      nodejs
+      bun
+      python3
+    ];
 }

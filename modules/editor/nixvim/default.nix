@@ -1,4 +1,4 @@
-{ ... }:
+{ pkgs, ... }:
 
 {
   imports = [
@@ -11,6 +11,8 @@
     defaultEditor = true;
     vimAlias = true;
     viAlias = true;
+
+    nixpkgs.source = pkgs.path;
 
     globals.mapleader = ",";
 
