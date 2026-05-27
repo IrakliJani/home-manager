@@ -14,11 +14,6 @@
         ignoreWhitespace = "all";
       };
 
-      gitbutler = {
-        aiModelProvider = "openai";
-        aiOpenAIKeyOption = "butlerAPI";
-      };
-
       init.defaultBranch = "main";
 
       merge.conflictStyle = "zdiff3";
