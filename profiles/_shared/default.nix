@@ -15,7 +15,7 @@
 
   # home.username is set by profile modules (e.g. profiles/irakli, profiles/claw)
   # home.homeDirectory is set by modules/platform/{darwin,linux}.nix
-  home.stateVersion = "25.05";
+  home.stateVersion = "26.05";
 
   home.sessionPath = [
     "$HOME/.local/bin"
