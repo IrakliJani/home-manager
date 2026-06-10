@@ -1,4 +1,9 @@
-{ pkgs, lib, ... }:
+{
+  pkgs,
+  pkgsUnstable,
+  lib,
+  ...
+}:
 
 {
   home.packages =
@@ -11,6 +16,9 @@
       # nix tooling
       nixd
       nixfmt
+
+      # git workflows
+      pkgsUnstable.graphite-cli
 
       # AI coding agent harnesses (from numtide/llm-agents.nix)
       llm-agents.pi
