@@ -18,7 +18,12 @@
 
       merge.conflictStyle = "zdiff3";
 
-      pager.branch = false;
+      pager = {
+        branch = false;
+        diff = "hunk pager";
+        show = "hunk pager";
+        stash = "hunk pager";
+      };
     };
   };
 }
