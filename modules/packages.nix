@@ -24,6 +24,9 @@
       llm-agents.pi
       llm-agents.opencode
       llm-agents.claude-code
+
+      # terminal workspace manager
+      llm-agents.herdr
     ]
     ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
       apfel-llm
