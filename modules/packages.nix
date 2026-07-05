@@ -5,6 +5,13 @@
   ...
 }:
 
+let
+  graphiteCli =
+    if pkgs.stdenv.hostPlatform.isDarwin then
+      pkgs.callPackage ../pkgs/graphite-cli-darwin.nix { }
+    else
+      pkgsUnstable.graphite-cli;
+in
 {
   home.packages =
     with pkgs;
@@ -18,7 +25,7 @@
       nixfmt
 
       # git workflows
-      pkgsUnstable.graphite-cli
+      graphiteCli
 
       # AI coding agent harnesses (from numtide/llm-agents.nix)
       llm-agents.pi

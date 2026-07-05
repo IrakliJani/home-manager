@@ -76,6 +76,7 @@
 
       unfreePackages = [
         "graphite-cli"
+        "graphite-cli-unwrapped"
         "ungoogled-chromium"
       ];
 
