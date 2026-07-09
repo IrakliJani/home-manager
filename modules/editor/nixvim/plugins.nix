@@ -1,10 +1,22 @@
-{ pkgsUnstable, ... }:
+{ ... }:
 
 {
   programs.nixvim = {
+    colorscheme = "github_dark_default";
+
+    colorschemes.github-theme = {
+      enable = true;
+      settings.options = {
+        transparent = true;
+        terminal_colors = true;
+        styles.comments = "italic";
+      };
+    };
+
     plugins.lualine = {
       enable = true;
       settings.options = {
+        theme = "auto";
         section_separators = {
           left = "";
           right = "";
@@ -18,8 +30,11 @@
     plugins.web-devicons.enable = true;
     plugins.telescope.enable = true;
     plugins.gitsigns.enable = true;
-    plugins.treesitter.enable = true;
-
+    plugins.treesitter = {
+      enable = true;
+      highlight.enable = true;
+      indent.enable = true;
+    };
     plugins.codediff = {
       enable = true;
       settings = {
@@ -95,10 +110,7 @@
       enable = true;
       servers = {
         nixd.enable = true;
-        tsgo = {
-          enable = true;
-          package = pkgsUnstable.typescript-go;
-        };
+        ts_ls.enable = true;
       };
     };
   };

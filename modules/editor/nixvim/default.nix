@@ -45,11 +45,12 @@
       BlinkCmpMenuBorder.bg = "none";
       BlinkCmpDocBorder.bg = "none";
       BlinkCmpSignatureHelpBorder.bg = "none";
+
     };
 
     opts = {
       number = true;
-      relativenumber = true;
+      relativenumber = false;
       shiftwidth = 2;
       tabstop = 2;
       expandtab = true;
