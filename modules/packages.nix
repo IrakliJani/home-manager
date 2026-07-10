@@ -32,6 +32,9 @@ in
       llm-agents.opencode
       llm-agents.claude-code
 
+      # Hugging Face CLI
+      python3Packages.huggingface-hub
+
       # terminal workspace manager
       llm-agents.herdr
     ]
