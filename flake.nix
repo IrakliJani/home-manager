@@ -71,7 +71,7 @@
         };
 
       overlays = [
-        llm-agents.overlays.default
+        llm-agents.overlays.shared-nixpkgs
       ];
 
       unfreePackages = [
