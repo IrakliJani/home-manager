@@ -11,6 +11,7 @@
     ../../modules/shell/direnv.nix
     ../../modules/shell/tools.nix
     ../../modules/editor/nixvim
+    ../../modules/editor/helix.nix
   ];
 
   # home.username is set by profile modules (e.g. profiles/irakli, profiles/claw)
