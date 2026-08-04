@@ -3,7 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-26.05-darwin";
-    nixpkgs-unstable.url = "github:nixos/nixpkgs/nixpkgs-unstable";
 
     home-manager.url = "github:nix-community/home-manager/release-26.05";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
@@ -21,7 +20,6 @@
   outputs =
     {
       nixpkgs,
-      nixpkgs-unstable,
       home-manager,
       nixvim,
       llm-agents,
@@ -66,8 +64,6 @@
             (mkProfileModule profile)
             (mkPlatformModule system)
           ];
-
-          _module.args.pkgsUnstable = mkPkgsUnstable system;
         };
 
       overlays = [
@@ -75,8 +71,6 @@
       ];
 
       unfreePackages = [
-        "graphite-cli"
-        "graphite-cli-unwrapped"
         "ungoogled-chromium"
       ];
 
@@ -85,13 +79,6 @@
         import nixpkgs {
           inherit system overlays;
           config.allowUnfreePredicate = pkg: builtins.elem (nixpkgs.lib.getName pkg) unfreePackages;
-        };
-
-      mkPkgsUnstable =
-        system:
-        import nixpkgs-unstable {
-          inherit system;
-          config.allowUnfreePredicate = pkg: builtins.elem (nixpkgs-unstable.lib.getName pkg) unfreePackages;
         };
 
       mkHome =
