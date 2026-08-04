@@ -1,0 +1,21 @@
+{
+  "repo": "/absolute/path/to/home-manager",
+  "herdr_config_dir": "/Users/USER/.config/herdr",
+  "socket_path": "/Users/USER/.config/herdr/herdr.sock",
+  "old_binary": "/nix/store/OLD-herdr-X.Y.Z/bin/herdr",
+  "old_version": "X.Y.Z",
+  "old_protocol": 17,
+  "new_binary": "/nix/store/NEW-herdr-A.B.C/bin/herdr",
+  "new_version": "A.B.C",
+  "new_protocol": 19,
+  "old_generation": "/nix/store/OLD-home-manager-generation",
+  "profile_path": "/Users/USER/.local/state/nix/profiles/home-manager",
+  "switch_argv": [
+    "/nix/store/HOME-MANAGER/bin/home-manager",
+    "switch",
+    "--flake",
+    ".#darwin"
+  ],
+  "home": "/Users/USER",
+  "path": "/Users/USER/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+}
