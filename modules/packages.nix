@@ -20,7 +20,7 @@
       llm-agents.pi
       llm-agents.opencode
       llm-agents.claude-code
-      llm-agents.codex
+      # llm-agents.codex
 
       # Hugging Face CLI
       python3Packages.huggingface-hub
