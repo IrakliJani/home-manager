@@ -900,6 +900,43 @@ def cli_ok(
     )
 
 
+def set_shell_cwd(
+    binary: str,
+    socket_path: str,
+    pane_id: str,
+    cwd: str,
+    *,
+    base_env: dict[str, str] | None = None,
+) -> None:
+    cli_ok(
+        binary,
+        socket_path,
+        ["pane", "run", pane_id, f"cd {shlex.quote(cwd)}"],
+        base_env=base_env,
+    )
+    deadline = time.monotonic() + 10
+    actual_cwd: object = None
+    while time.monotonic() < deadline:
+        snapshot = api_request(socket_path, "session.snapshot", {}).get("snapshot")
+        panes = snapshot.get("panes", []) if isinstance(snapshot, dict) else []
+        pane = next(
+            (
+                value
+                for value in panes
+                if isinstance(value, dict) and value.get("pane_id") == pane_id
+            ),
+            None,
+        )
+        if isinstance(pane, dict):
+            actual_cwd = pane.get("foreground_cwd") or pane.get("cwd")
+            if actual_cwd == cwd:
+                return
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"pane {pane_id} did not change cwd to {cwd!r}; current cwd is {actual_cwd!r}"
+    )
+
+
 def instantiate_layout(
     binary: str,
     socket_path: str,
@@ -1073,6 +1110,14 @@ def restore_manifest(
                     ["tab", "rename", new_tab_id, tab_label],
                     base_env=base_env,
                 )
+                if tab_cwd != identity_cwd:
+                    set_shell_cwd(
+                        binary,
+                        socket_path,
+                        new_tab_root_pane_id,
+                        tab_cwd,
+                        base_env=base_env,
+                    )
             else:
                 created_tab = cli_json(
                     binary,
@@ -1221,6 +1266,7 @@ def verify_topology(
     actual_tabs = current["tabs"]
     actual_panes = current["panes"]
     errors: list[str] = []
+    layout_mismatches: list[dict[str, object]] = []
     expected_tab_count = sum(len(value["tabs"]) for value in expected_workspaces)
     expected_pane_count = sum(
         len(tab["panes"])
@@ -1258,8 +1304,18 @@ def verify_topology(
                 "layout.export",
                 {"tab_id": new_tab_id, "pane_id": None},
             )["layout"]
-            if normalized_layout(exported["root"]) != normalized_layout(tab_record["layout"]["root"]):
+            expected_layout = normalized_layout(tab_record["layout"]["root"])
+            actual_layout = normalized_layout(exported["root"])
+            if actual_layout != expected_layout:
                 errors.append(f"layout mismatch for {old_tab['tab_id']}")
+                layout_mismatches.append(
+                    {
+                        "source_tab_id": old_tab["tab_id"],
+                        "target_tab_id": new_tab_id,
+                        "expected": expected_layout,
+                        "actual": actual_layout,
+                    }
+                )
             if bool(exported.get("zoomed")) != bool(tab_record["layout"].get("zoomed")):
                 errors.append(f"zoom mismatch for {old_tab['tab_id']}")
             expected_focused_pane = pane_map.get(str(tab_record["layout"].get("focused_pane_id")))
@@ -1277,6 +1333,7 @@ def verify_topology(
         "verified_at": now_iso(),
         "valid": not errors,
         "errors": errors,
+        "layout_mismatches": layout_mismatches,
         "counts": {
             "workspaces": len(actual_workspaces),
             "tabs": len(actual_tabs),
@@ -1326,6 +1383,10 @@ def stop_server(binary: str, socket_path: str, env: dict[str, str]) -> None:
 def self_test(manifest: dict[str, object]) -> dict[str, object]:
     config = load_config()
     new_binary = str(config["new_binary"])
+    report_path = BUNDLE / "self-test-report.json"
+    saved_log_path = BUNDLE / "self-test-server.log"
+    for stale_path in (report_path, saved_log_path):
+        stale_path.unlink(missing_ok=True)
     root = Path("/tmp") / f"herdr-migration-test-{os.getpid()}"
     if root.exists():
         shutil.rmtree(root)
@@ -1334,13 +1395,15 @@ def self_test(manifest: dict[str, object]) -> dict[str, object]:
     env["HOME"] = str(root)
     env["XDG_CONFIG_HOME"] = str(root / ".c")
     socket_path = str(root / ".c" / "herdr" / "herdr.sock")
-    process = start_server(
-        new_binary,
-        env=env,
-        cwd=str(root),
-        log_path=root / "server.log",
-    )
+    server_log_path = root / "server.log"
+    process: subprocess.Popen[bytes] | None = None
     try:
+        process = start_server(
+            new_binary,
+            env=env,
+            cwd=str(root),
+            log_path=server_log_path,
+        )
         wait_for_server(socket_path, int(config["new_protocol"]), timeout=30)
         mapping = restore_manifest(
             manifest,
@@ -1350,22 +1413,39 @@ def self_test(manifest: dict[str, object]) -> dict[str, object]:
             run_commands=False,
         )
         verification = verify_topology(manifest, socket_path, mapping)
+        write_json(report_path, verification)
         if not verification["valid"]:
             raise RuntimeError(
-                "isolated topology restore failed:\n- "
+                "isolated topology restore failed; inspect self-test-report.json:\n- "
                 + "\n- ".join(str(value) for value in verification["errors"])
             )
-        write_json(BUNDLE / "self-test-report.json", verification)
         return verification
+    except Exception as error:
+        if not report_path.exists():
+            write_json(
+                report_path,
+                {
+                    "verified_at": now_iso(),
+                    "valid": False,
+                    "errors": [str(error)],
+                    "layout_mismatches": [],
+                    "counts": {},
+                },
+            )
+        raise
     finally:
-        try:
-            stop_server(new_binary, socket_path, env)
-        except Exception:
-            process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        if process is not None:
+            try:
+                stop_server(new_binary, socket_path, env)
+            except Exception:
+                process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        if server_log_path.exists():
+            shutil.copy2(server_log_path, saved_log_path)
+            os.chmod(saved_log_path, 0o600)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -1523,8 +1603,50 @@ def wait_for_processes(
     }
 
 
+def cutover_preflight(config: dict[str, object]) -> tuple[list[str], str, str, str]:
+    switch_argv = config.get("switch_argv")
+    if not isinstance(switch_argv, list) or not switch_argv or not all(
+        isinstance(value, str) for value in switch_argv
+    ):
+        raise RuntimeError("migration config requires switch_argv as a string array")
+    if not os.path.isabs(switch_argv[0]) or not os.access(switch_argv[0], os.X_OK):
+        raise RuntimeError("switch_argv must start with an absolute executable")
+    profile_path_value = config.get("profile_path")
+    old_generation_value = config.get("old_generation")
+    new_generation_value = config.get("new_generation")
+    if not isinstance(profile_path_value, str):
+        raise RuntimeError("migration config requires profile_path")
+    if not isinstance(old_generation_value, str):
+        raise RuntimeError("migration config requires old_generation")
+    if not isinstance(new_generation_value, str):
+        raise RuntimeError("migration config requires new_generation")
+    profile_path = os.path.expanduser(profile_path_value)
+    old_generation = os.path.realpath(old_generation_value)
+    new_generation = os.path.realpath(new_generation_value)
+    active_generation = os.path.realpath(profile_path)
+    if active_generation != old_generation:
+        raise RuntimeError(
+            "active Home Manager generation changed since snapshot preparation: "
+            f"expected {old_generation}, found {active_generation}"
+        )
+    if not Path(new_generation).is_dir() or not (Path(new_generation) / "activate").is_file():
+        raise RuntimeError(f"built target generation is unavailable: {new_generation}")
+    for role, binary in (
+        ("old", config.get("old_binary")),
+        ("new", config.get("new_binary")),
+    ):
+        if (
+            not isinstance(binary, str)
+            or not os.path.isabs(binary)
+            or not os.access(binary, os.X_OK)
+        ):
+            raise RuntimeError(f"{role} Herdr binary is unavailable: {binary}")
+    return [str(value) for value in switch_argv], profile_path, old_generation, new_generation
+
+
 def cutover() -> None:
     config = load_config()
+    switch_argv, profile_path, old_generation, new_generation = cutover_preflight(config)
     lock_path = BUNDLE / "cutover.lock"
     try:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -1540,6 +1662,10 @@ def cutover() -> None:
     manifest: dict[str, object] | None = None
     server_process: subprocess.Popen[bytes] | None = None
     try:
+        log(
+            "generation preflight passed: "
+            f"source={old_generation} target={new_generation}"
+        )
         log(f"capturing final protocol-{config['old_protocol']} manifest")
         manifest = snapshot(FINAL_MANIFEST_PATH, archive_scrollback=False)
         report = validate_manifest(manifest)
@@ -1549,11 +1675,6 @@ def cutover() -> None:
         stop_server(old_binary, socket_path, env)
         copy_runtime_files(config_dir, BUNDLE / "post-stop-config")
         move_session_state(config_dir, BUNDLE / "legacy-session-state")
-        switch_argv = config.get("switch_argv")
-        if not isinstance(switch_argv, list) or not switch_argv or not all(
-            isinstance(value, str) for value in switch_argv
-        ):
-            raise RuntimeError("migration config requires switch_argv as a string array")
         log(f"running activation command: {shlex.join(switch_argv)}")
         switch = run(
             switch_argv,
@@ -1566,6 +1687,12 @@ def cutover() -> None:
         (BUNDLE / "home-manager-switch.stderr.log").write_text(switch.stderr)
         if switch.returncode != 0:
             raise RuntimeError(f"Home Manager switch failed with exit {switch.returncode}")
+        active_generation = os.path.realpath(profile_path)
+        if active_generation != new_generation:
+            raise RuntimeError(
+                "Home Manager activated an unverified generation: "
+                f"expected {new_generation}, found {active_generation}"
+            )
         version = run([new_binary, "--version"], env=env, timeout=30).stdout.strip()
         log(f"activated {version}")
         server_process = start_server(
@@ -1584,6 +1711,7 @@ def cutover() -> None:
             run_commands=True,
         )
         topology = verify_topology(manifest, socket_path, mapping)
+        write_json(BUNDLE / "topology-verification-report.json", topology)
         if not topology["valid"]:
             raise RuntimeError(
                 "restored topology verification failed: "
@@ -1604,9 +1732,7 @@ def cutover() -> None:
             "target": manifest["target"],
             "topology": topology["counts"],
             "process_health": process_health,
-            "active_generation": os.path.realpath(
-                os.path.expanduser(str(config.get("profile_path", "~/.local/state/nix/profiles/home-manager")))
-            ),
+            "active_generation": active_generation,
             "server_pid": server_process.pid if server_process else None,
             "bundle": str(BUNDLE),
         }
@@ -1653,13 +1779,20 @@ def cutover() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("preflight")
     snapshot_parser = subparsers.add_parser("snapshot")
     snapshot_parser.add_argument("--archive-scrollback", action="store_true")
     subparsers.add_parser("validate")
     subparsers.add_parser("self-test")
     subparsers.add_parser("cutover")
     args = parser.parse_args()
-    if args.command == "snapshot":
+    if args.command == "preflight":
+        _, _, old_generation, new_generation = cutover_preflight(load_config())
+        log(
+            "cutover preflight passed: "
+            f"source={old_generation} target={new_generation}"
+        )
+    elif args.command == "snapshot":
         value = snapshot(MANIFEST_PATH, args.archive_scrollback)
         report = validate_manifest(value)
         log(f"snapshot complete: {json.dumps(report['counts'], sort_keys=True)}")

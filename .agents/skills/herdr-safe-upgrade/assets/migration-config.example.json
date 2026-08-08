@@ -8,6 +8,7 @@
   "new_binary": "/nix/store/NEW-herdr-A.B.C/bin/herdr",
   "new_version": "A.B.C",
   "new_protocol": 19,
+  "new_generation": "/nix/store/NEW-home-manager-generation",
   "old_generation": "/nix/store/OLD-home-manager-generation",
   "profile_path": "/Users/USER/.local/state/nix/profiles/home-manager",
   "switch_argv": [

@@ -12,7 +12,8 @@ Use a declarative manifest and a detached one-shot cutover. Never rely on a new 
 
 - Require explicit approval before stopping Herdr or activating the new Home Manager generation.
 - Capture the absolute old Herdr binary before switching. Keep its Nix store path and the old Home Manager generation until verification succeeds.
-- Build the target generation without activating it. Only run local commands such as `--version`, `status client`, and `api schema` with the target binary before cutover. Never point it at the old socket.
+- Build the target generation without activating it. Only run local commands such as `--version`, `status client`, and `api schema` with the target binary before cutover. Strip every inherited `HERDR_*` variable and never point it at the old socket.
+- Build and activate the exact same Git-visible source. Git-backed flakes omit untracked files; do not let the repository or lock file drift after the verified build.
 - Store runtime manifests and scrollback outside Git in a mode-`0700` migration bundle. They contain private paths, session IDs, commands, and terminal text.
 - Do not persist process environments or secrets. The engine extracts only the Claude session ID from process environments.
 - Do not garbage-collect Nix store paths during migration.
@@ -24,7 +25,7 @@ The engine supports:
 
 - one running named Herdr session; stopped sessions are backed up but not replayed
 - any number of workspaces, tabs, and panes in that session
-- exact nested split direction/ratio, CWD, labels, zoom, active tabs, and focus
+- exact workspace identity CWD, per-pane CWD, nested split direction/ratio, labels, zoom, active tabs, and focus
 - Pi sessions, Claude sessions, shell-only panes, and arbitrary foreground commands
 - protocol-independent reconstruction through stable CLI/API operations
 
@@ -55,16 +56,27 @@ nix flake update
 home-manager build --flake .#darwin
 ```
 
-Resolve and inspect the target without connecting it to the live socket:
+A `.#darwin` Git flake omits untracked files. Before building, ensure every intended new module is committed or at least tracked without staging unrelated changes. Avoid substituting `path:$PWD` when private untracked files could be copied to the Nix store. The eventual `switch_argv` must use the same flake reference and unchanged working tree.
+
+Resolve and inspect the target without connecting it to the live socket. Remove the caller pane context as well as the socket override from these target-only commands:
 
 ```bash
 NEW_HERDR=$(realpath result/home-path/bin/herdr)
-"$NEW_HERDR" --version
-"$NEW_HERDR" status client
-"$NEW_HERDR" api schema --json > /tmp/herdr-target-schema.json
+TARGET_GENERATION=$(realpath result)
+TARGET_ENV=(
+  env
+  -u HERDR_ENV
+  -u HERDR_SOCKET_PATH
+  -u HERDR_WORKSPACE_ID
+  -u HERDR_TAB_ID
+  -u HERDR_PANE_ID
+)
+"${TARGET_ENV[@]}" "$NEW_HERDR" --version
+"${TARGET_ENV[@]}" "$NEW_HERDR" status client
+"${TARGET_ENV[@]}" "$NEW_HERDR" api schema --json > /tmp/herdr-target-schema.json
 ```
 
-Verify the build and any accompanying package changes before migration.
+Verify the build and accompanying package changes before migration. Record `TARGET_GENERATION`, and rebuild and recreate the bundle if the repository or lock file changes afterward.
 
 ## 3. Create the private bundle
 
@@ -84,6 +96,7 @@ Fill every placeholder in `migration-config.json`. See [the example](assets/migr
 
 - `old_binary`, `old_version`, `old_protocol`: live client/server
 - `new_binary`, `new_version`, `new_protocol`: built target
+- `new_generation`: exact `TARGET_GENERATION` store path proved by the build
 - `old_generation`: rollback generation containing the old client
 - `switch_argv`: exact activation command as an argv array, never a shell string
 - `home`, `path`: environment inherited by the detached server and restored shells
@@ -94,15 +107,19 @@ Use absolute paths. The activation binary itself should be an absolute Nix store
 ## 4. Snapshot and prove restoration
 
 ```bash
+"$BUNDLE/herdr_migrate.py" preflight
 "$BUNDLE/herdr_migrate.py" snapshot --archive-scrollback
 "$BUNDLE/herdr_migrate.py" validate
 "$BUNDLE/herdr_migrate.py" self-test
 ```
 
+`preflight` is non-mutating. It requires absolute executable paths, proves that `old_generation` is still active, and checks that `new_generation` and both Herdr binaries remain available.
+
 The snapshot combines:
 
 - `session.snapshot` for global topology and focus
-- raw `layout.export` for split trees and ratios
+- persisted workspace identity CWD, kept distinct from each pane's live CWD
+- raw `layout.export` for split trees, ratios, and per-pane CWD
 - `pane.process_info` plus process ancestry for root argv/CWD
 - Pi session headers, names, process start times, and resume events
 - `CLAUDE_CODE_SESSION_ID` plus the matching Claude JSONL
@@ -110,7 +127,15 @@ The snapshot combines:
 
 `self-test` starts the target server under a short isolated `/tmp` config, recreates the complete real topology with commands disabled, compares normalized layouts/focus/zoom, then stops and removes that server.
 
+Workspace creation deserves special care: `workspace create --cwd` initializes both the workspace identity and its first tab's shell, but those CWDs can later diverge. The engine preserves the identity CWD, sends a safely quoted `cd` to the new first-tab shell when needed, and waits until `session.snapshot` reports the expected pane CWD before creating splits or restarting anything. A timeout is a hard failure.
+
+The engine replaces stale diagnostics on every run, writes `self-test-report.json` on success or failure, and preserves the isolated server output as `self-test-server.log`. Layout mismatches include normalized expected and actual trees so CWD, direction, or ratio differences are directly diagnosable.
+
 Do not continue unless both reports say `valid: true`, every pane is classified, all session files exist, and counts match the live snapshot. Present the report and get approval if cutover was not already approved.
+
+### If self-test fails
+
+The isolated server is removed and the live session is unchanged. Stop and inspect `self-test-report.json` and `self-test-server.log`. Fix reconstruction in the repository engine; never edit the captured manifest, weaken normalization, or skip verification to make the test pass. Preserve the failed bundled engine, install the corrected source into the bundle, run `python3 -m py_compile`, and rerun preflight, snapshot, validation, and self-test before asking for cutover approval.
 
 ## 5. Launch the detached cutover
 
@@ -128,16 +153,17 @@ Always use `cutover-wrapper.sh`, not the Python engine directly through `launchc
 
 The detached cutover:
 
-1. takes and validates a fresh final source-protocol manifest
-2. saves pre-stop state
-3. stops the source server with the absolute old client
-4. saves post-stop state and moves legacy session files aside
-5. runs `switch_argv`
-6. starts the target server and checks its protocol
-7. recreates topology and maps all new IDs from API responses
-8. resumes agents and restarts commands
-9. verifies topology and waits for every expected agent/process
-10. writes `success.json` or automatically attempts rollback
+1. proves `old_generation` is still active and the built `new_generation` still exists
+2. takes and validates a fresh final source-protocol manifest
+3. saves pre-stop state
+4. stops the source server with the absolute old client
+5. saves post-stop state and moves legacy session files aside
+6. runs `switch_argv` and proves the active profile equals `new_generation`
+7. starts the target server and checks its protocol
+8. recreates topology and maps all new IDs from API responses
+9. resumes agents and restarts commands
+10. verifies topology and waits for every expected agent/process
+11. writes `success.json` or automatically attempts rollback
 
 ## 6. Verify after reconnect
 
@@ -160,4 +186,4 @@ Keep the bundle, old generation, and old binary until the user confirms the rest
 
 ## Failure handling
 
-The engine records `failure.json`, stops whichever protocol is running, restores post-stop source state, activates `old_generation`, starts the old server, and restarts captured commands in the original pane IDs. Inspect `rollback.json` and `cutover.log`; never discard the bundle while diagnosing.
+The engine records `failure.json`, stops whichever protocol is running, restores post-stop source state, activates `old_generation`, starts the old server, and restarts captured commands in the original pane IDs. Inspect `self-test-report.json`, `topology-verification-report.json`, `rollback.json`, and `cutover.log` as applicable; never discard the bundle while diagnosing.
