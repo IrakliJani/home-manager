@@ -11,7 +11,7 @@ in
 
       ui = {
         agent_panel_sort = "priority";
-        pane_borders = false;
+        pane_borders = true;
         pane_gaps = false;
         pane_scrollbars = true;
         show_agent_labels_on_pane_borders = true;
