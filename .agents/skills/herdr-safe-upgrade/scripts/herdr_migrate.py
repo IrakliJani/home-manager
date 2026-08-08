@@ -191,6 +191,37 @@ def process_env_value(pid: int, key: str) -> str | None:
     return match.group(1) if match else None
 
 
+def process_executable(pid: int) -> str | None:
+    proc_pidpath = Path("/usr/bin/proc_pidpath")
+    if proc_pidpath.is_file():
+        result = run([str(proc_pidpath), str(pid)], timeout=10, check=False)
+        value = result.stdout.strip()
+        if value.startswith("/") and Path(value).is_file():
+            return value
+    result = run(["ps", "-p", str(pid), "-o", "comm="], timeout=10, check=False)
+    value = result.stdout.strip()
+    if value.startswith("/") and Path(value).is_file():
+        return value
+    lsof = Path("/usr/sbin/lsof")
+    if lsof.is_file():
+        result = run(
+            [str(lsof), "-a", "-p", str(pid), "-d", "txt", "-Fn"],
+            timeout=10,
+            check=False,
+        )
+        for line in result.stdout.splitlines():
+            value = line[1:] if line.startswith("n") else ""
+            if value.startswith("/") and Path(value).is_file():
+                return value
+    proc_link = Path("/proc") / str(pid) / "exe"
+    if proc_link.exists():
+        try:
+            return os.path.realpath(proc_link)
+        except OSError:
+            return None
+    return None
+
+
 def select_root_process(process_info: dict[str, object]) -> dict[str, object] | None:
     processes_value = process_info.get("foreground_processes", [])
     if not isinstance(processes_value, list) or not processes_value:
@@ -608,10 +639,15 @@ def snapshot(output: Path, archive_scrollback: bool) -> dict[str, object]:
             else:
                 if not root_argv:
                     raise RuntimeError(f"running pane {pane_id} has no argv")
+                executable = process_executable(root_pid) if isinstance(root_pid, int) else None
+                restart_argv = list(root_argv)
+                if executable:
+                    restart_argv[0] = executable
                 restore_by_pane[pane_id] = {
                     "kind": "command",
-                    "argv": root_argv,
+                    "argv": restart_argv,
                     "cwd": root_cwd,
+                    "executable": executable,
                     "original_argv": root_argv,
                 }
 
@@ -900,6 +936,60 @@ def cli_ok(
     )
 
 
+def pane_process_info(socket_path: str, pane_id: str) -> dict[str, object]:
+    result = api_request(socket_path, "pane.process_info", {"pane_id": pane_id})
+    value = result.get("process_info")
+    if not isinstance(value, dict):
+        raise RuntimeError(f"pane.process_info returned no data for {pane_id}")
+    return value
+
+
+def foreground_argvs(process_info: dict[str, object]) -> list[list[str]]:
+    values = process_info.get("foreground_processes", [])
+    if not isinstance(values, list):
+        return []
+    return [
+        [str(argument) for argument in value.get("argv", [])]
+        for value in values
+        if isinstance(value, dict) and isinstance(value.get("argv"), list)
+    ]
+
+
+def shell_is_ready(process_info: dict[str, object]) -> bool:
+    shell_pid = process_info.get("shell_pid")
+    values = process_info.get("foreground_processes", [])
+    if not isinstance(shell_pid, int) or not isinstance(values, list) or not values:
+        return False
+    pids = [value.get("pid") for value in values if isinstance(value, dict)]
+    return bool(pids) and all(pid == shell_pid for pid in pids)
+
+
+def wait_for_shell_ready(
+    socket_path: str,
+    pane_id: str,
+    *,
+    timeout: float = 600,
+    settle_seconds: float = 2,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    ready_since: float | None = None
+    last_info: dict[str, object] | None = None
+    while time.monotonic() < deadline:
+        last_info = pane_process_info(socket_path, pane_id)
+        if shell_is_ready(last_info):
+            ready_since = ready_since or time.monotonic()
+            if time.monotonic() - ready_since >= settle_seconds:
+                return last_info
+        else:
+            ready_since = None
+        time.sleep(0.25)
+    actual = foreground_argvs(last_info) if isinstance(last_info, dict) else []
+    raise RuntimeError(
+        f"pane {pane_id} shell did not become ready within {timeout:.0f}s; "
+        f"foreground argv={actual!r}"
+    )
+
+
 def set_shell_cwd(
     binary: str,
     socket_path: str,
@@ -908,6 +998,7 @@ def set_shell_cwd(
     *,
     base_env: dict[str, str] | None = None,
 ) -> None:
+    wait_for_shell_ready(socket_path, pane_id)
     cli_ok(
         binary,
         socket_path,
@@ -1185,6 +1276,11 @@ def restore_manifest(
             new_pane_id = pane_map.get(old_pane_id)
             if not new_pane_id:
                 raise RuntimeError(f"no new pane mapping for {old_pane_id}")
+            wait_for_shell_ready(socket_path, new_pane_id)
+            log(
+                f"starting {restore.get('kind', 'process')} from {old_pane_id} "
+                f"in {new_pane_id}"
+            )
             command = shlex.join([str(value) for value in argv])
             cli_ok(
                 binary,
@@ -1392,7 +1488,7 @@ def self_test(manifest: dict[str, object]) -> dict[str, object]:
         shutil.rmtree(root)
     root.mkdir(mode=0o700)
     env = clean_herdr_env()
-    env["HOME"] = str(root)
+    env["HOME"] = str(config["home"])
     env["XDG_CONFIG_HOME"] = str(root / ".c")
     socket_path = str(root / ".c" / "herdr" / "herdr.sock")
     server_log_path = root / "server.log"
@@ -1412,6 +1508,13 @@ def self_test(manifest: dict[str, object]) -> dict[str, object]:
             base_env=env,
             run_commands=False,
         )
+        pane_map = mapping.get("pane_map")
+        if not isinstance(pane_map, dict):
+            raise RuntimeError("isolated restore returned no pane map")
+        for pane_id in pane_map.values():
+            if not isinstance(pane_id, str):
+                raise RuntimeError("isolated restore returned an invalid pane id")
+            wait_for_shell_ready(socket_path, pane_id)
         verification = verify_topology(manifest, socket_path, mapping)
         write_json(report_path, verification)
         if not verification["valid"]:
@@ -1471,32 +1574,240 @@ def restore_legacy_state(config_dir: Path, source: Path) -> None:
             shutil.copy2(archived, current)
 
 
+def restore_config_file(config_dir: Path, source: Path) -> None:
+    archived = source / "config.toml"
+    if not archived.is_file():
+        return
+    current = config_dir / "config.toml"
+    if current.exists() or current.is_symlink():
+        current.unlink()
+    shutil.copy2(archived, current)
+
+
+def manifest_restore_records(
+    manifest: dict[str, object],
+) -> list[tuple[str, dict[str, object]]]:
+    sessions = manifest.get("sessions")
+    if not isinstance(sessions, list):
+        raise RuntimeError("manifest has no sessions")
+    source = next(
+        value for value in sessions if isinstance(value, dict) and value.get("running")
+    )
+    records: list[tuple[str, dict[str, object]]] = []
+    for workspace in source["workspaces"]:
+        for tab in workspace["tabs"]:
+            for pane_record in tab["panes"]:
+                pane = pane_record.get("pane")
+                restore = pane_record.get("restore")
+                pane_id = pane.get("pane_id") if isinstance(pane, dict) else None
+                if isinstance(pane_id, str) and isinstance(restore, dict):
+                    records.append((pane_id, restore))
+    return records
+
+
+def detected_agent_records(socket_path: str) -> dict[str, dict[str, object]]:
+    result = api_request(socket_path, "agent.list", {})
+    values = result.get("agents", [])
+    if not isinstance(values, list):
+        return {}
+    return {
+        str(value["pane_id"]): value
+        for value in values
+        if isinstance(value, dict) and isinstance(value.get("pane_id"), str)
+    }
+
+
+def detected_agents(socket_path: str) -> dict[str, str]:
+    return {
+        pane_id: str(value["agent"])
+        for pane_id, value in detected_agent_records(socket_path).items()
+        if isinstance(value.get("agent"), str)
+    }
+
+
+def agent_matches_restore(
+    agent_record: dict[str, object] | None,
+    restore: dict[str, object],
+) -> bool:
+    if not isinstance(agent_record, dict) or agent_record.get("agent") != restore.get("agent"):
+        return False
+    expected_session_id = restore.get("session_id")
+    if not isinstance(expected_session_id, str) or not expected_session_id:
+        return True
+    session = agent_record.get("agent_session")
+    actual_value = session.get("value") if isinstance(session, dict) else None
+    return isinstance(actual_value, str) and (
+        actual_value == expected_session_id or expected_session_id in actual_value
+    )
+
+
+def command_matches_process_info(
+    process_info: dict[str, object],
+    restore: dict[str, object],
+) -> bool:
+    expected_value = restore.get("argv")
+    if not isinstance(expected_value, list) or not expected_value:
+        return False
+    expected = [str(value) for value in expected_value]
+    executable = restore.get("executable")
+    values = process_info.get("foreground_processes", [])
+    if not isinstance(values, list):
+        return False
+    for value in values:
+        if not isinstance(value, dict) or not isinstance(value.get("argv"), list):
+            continue
+        actual = [str(argument) for argument in value["argv"]]
+        if actual == expected:
+            return True
+        pid = value.get("pid")
+        if (
+            isinstance(executable, str)
+            and isinstance(pid, int)
+            and actual[1:] == expected[1:]
+            and process_executable(pid) == executable
+        ):
+            return True
+    return False
+
+
+def command_is_running(
+    socket_path: str,
+    pane_id: str,
+    restore: dict[str, object],
+) -> bool:
+    return command_matches_process_info(
+        pane_process_info(socket_path, pane_id),
+        restore,
+    )
+
+
+def wait_for_panes(
+    socket_path: str,
+    expected_ids: set[str],
+    *,
+    timeout: float = 180,
+) -> None:
+    deadline = time.monotonic() + timeout
+    current_ids: set[str] = set()
+    while time.monotonic() < deadline:
+        values = api_request(socket_path, "pane.list", {}).get("panes", [])
+        current_ids = {
+            str(value["pane_id"])
+            for value in values
+            if isinstance(value, dict) and isinstance(value.get("pane_id"), str)
+        } if isinstance(values, list) else set()
+        if expected_ids <= current_ids:
+            return
+        time.sleep(0.25)
+    raise RuntimeError(
+        "restored pane topology did not stabilize; missing "
+        f"{sorted(expected_ids - current_ids)}"
+    )
+
+
+def wait_for_agent_or_shell(
+    socket_path: str,
+    pane_id: str,
+    restore: dict[str, object],
+    *,
+    timeout: float = 600,
+) -> str:
+    deadline = time.monotonic() + timeout
+    last_info: dict[str, object] | None = None
+    while time.monotonic() < deadline:
+        agent_record = detected_agent_records(socket_path).get(pane_id)
+        if agent_matches_restore(agent_record, restore):
+            return "matched"
+        if agent_record is not None:
+            return "mismatched"
+        last_info = pane_process_info(socket_path, pane_id)
+        if shell_is_ready(last_info):
+            return "shell"
+        time.sleep(0.25)
+    actual = foreground_argvs(last_info) if isinstance(last_info, dict) else []
+    raise RuntimeError(
+        f"pane {pane_id} neither resumed its expected agent nor returned to its shell; "
+        f"foreground argv={actual!r}"
+    )
+
+
 def run_restore_commands_on_existing(
     manifest: dict[str, object],
     binary: str,
     socket_path: str,
     env: dict[str, str],
-) -> None:
-    sessions = manifest["sessions"]
-    source = next(value for value in sessions if isinstance(value, dict) and value.get("running"))
-    panes = api_request(socket_path, "pane.list", {}).get("panes", [])
-    current_ids = {
-        value.get("pane_id") for value in panes if isinstance(value, dict)
-    } if isinstance(panes, list) else set()
-    for workspace in source["workspaces"]:
-        for tab in workspace["tabs"]:
-            for pane_record in tab["panes"]:
-                pane_id = pane_record["pane"]["pane_id"]
-                restore = pane_record["restore"]
-                argv = restore.get("argv")
-                if pane_id not in current_ids or not isinstance(argv, list) or not argv:
-                    continue
-                cli_ok(
-                    binary,
-                    socket_path,
-                    ["pane", "run", pane_id, shlex.join([str(value) for value in argv])],
-                    base_env=env,
-                )
+) -> dict[str, object]:
+    records = manifest_restore_records(manifest)
+    expected_ids = {pane_id for pane_id, _ in records}
+    wait_for_panes(socket_path, expected_ids)
+
+    for pane_id, restore in records:
+        argv = restore.get("argv")
+        if restore.get("kind") != "command" or not isinstance(argv, list) or not argv:
+            continue
+        if command_is_running(socket_path, pane_id, restore):
+            continue
+        wait_for_shell_ready(socket_path, pane_id)
+        cli_ok(
+            binary,
+            socket_path,
+            ["pane", "run", pane_id, shlex.join([str(value) for value in argv])],
+            base_env=env,
+        )
+
+    auto_resume_deadline = time.monotonic() + 30
+    while time.monotonic() < auto_resume_deadline:
+        agent_records = detected_agent_records(socket_path)
+        missing = [
+            pane_id
+            for pane_id, restore in records
+            if restore.get("kind") == "agent"
+            and not agent_matches_restore(agent_records.get(pane_id), restore)
+        ]
+        if not missing:
+            break
+        time.sleep(0.5)
+
+    for pane_id, restore in records:
+        argv = restore.get("argv")
+        agent = restore.get("agent")
+        if (
+            restore.get("kind") != "agent"
+            or not isinstance(agent, str)
+            or not isinstance(argv, list)
+            or not argv
+        ):
+            continue
+        state = wait_for_agent_or_shell(socket_path, pane_id, restore)
+        if state == "matched":
+            continue
+        if state == "mismatched":
+            cli_ok(
+                binary,
+                socket_path,
+                ["agent", "send-keys", pane_id, "ctrl+d"],
+                base_env=env,
+            )
+            wait_for_shell_ready(socket_path, pane_id, timeout=60)
+        elif state == "shell":
+            wait_for_shell_ready(socket_path, pane_id)
+        if not agent_matches_restore(
+            detected_agent_records(socket_path).get(pane_id),
+            restore,
+        ):
+            cli_ok(
+                binary,
+                socket_path,
+                ["pane", "run", pane_id, shlex.join([str(value) for value in argv])],
+                base_env=env,
+            )
+
+    identity_map = {pane_id: pane_id for pane_id, _ in records}
+    health = wait_for_processes(manifest, socket_path, identity_map, timeout=300)
+    write_json(BUNDLE / "rollback-process-health-report.json", health)
+    if not health["ready"]:
+        raise RuntimeError(f"rollback processes did not recover: {health['missing']}")
+    return health
 
 
 def rollback(manifest: dict[str, object], reason: str) -> dict[str, object]:
@@ -1520,6 +1831,7 @@ def rollback(manifest: dict[str, object], reason: str) -> dict[str, object]:
     old_activate = str(config["old_generation"]) + "/activate"
     activation = run([old_activate], env=env, timeout=600, check=False)
     log(f"rollback activation exit={activation.returncode}")
+    restore_config_file(config_dir, legacy_state)
     process = start_server(
         old_binary,
         env=env,
@@ -1527,12 +1839,18 @@ def rollback(manifest: dict[str, object], reason: str) -> dict[str, object]:
         log_path=BUNDLE / "rollback-server.log",
     )
     wait_for_server(socket_path, int(config["old_protocol"]), timeout=30)
-    run_restore_commands_on_existing(manifest, old_binary, socket_path, env)
+    process_health = run_restore_commands_on_existing(
+        manifest,
+        old_binary,
+        socket_path,
+        env,
+    )
     result = {
         "rolled_back_at": now_iso(),
         "reason": reason,
         "old_server_pid": process.pid,
         "protocol": config["old_protocol"],
+        "process_health": process_health,
     }
     write_json(BUNDLE / "rollback.json", result)
     return result
@@ -1544,62 +1862,80 @@ def wait_for_processes(
     pane_map: dict[str, str],
     timeout: float = 180,
 ) -> dict[str, object]:
-    sessions = manifest["sessions"]
-    source = next(value for value in sessions if isinstance(value, dict) and value.get("running"))
     expected: dict[str, dict[str, object]] = {}
-    for workspace in source["workspaces"]:
-        for tab in workspace["tabs"]:
-            for pane_record in tab["panes"]:
-                restore = pane_record["restore"]
-                if restore.get("argv"):
-                    expected[pane_map[pane_record["pane"]["pane_id"]]] = restore
+    for old_pane_id, restore in manifest_restore_records(manifest):
+        if not restore.get("argv"):
+            continue
+        new_pane_id = pane_map.get(old_pane_id)
+        if not isinstance(new_pane_id, str):
+            raise RuntimeError(f"no pane mapping for expected process {old_pane_id}")
+        expected[new_pane_id] = restore
+
     deadline = time.monotonic() + timeout
     last_missing: list[str] = []
+    last_mismatches: dict[str, object] = {}
+    last_agent_records: dict[str, dict[str, object]] = {}
     while time.monotonic() < deadline:
-        snapshot_value = api_request(socket_path, "session.snapshot", {})["snapshot"]
-        agents_value = snapshot_value.get("agents", [])
-        agent_by_pane = {
-            value.get("pane_id"): value.get("agent")
-            for value in agents_value
-            if isinstance(value, dict)
-        } if isinstance(agents_value, list) else {}
+        last_agent_records = detected_agent_records(socket_path)
         missing: list[str] = []
+        mismatches: dict[str, object] = {}
         for pane_id, restore in expected.items():
             if restore.get("kind") == "agent":
-                if agent_by_pane.get(pane_id) != restore.get("agent"):
+                actual_record = last_agent_records.get(pane_id)
+                if not agent_matches_restore(actual_record, restore):
+                    actual_session = (
+                        actual_record.get("agent_session")
+                        if isinstance(actual_record, dict)
+                        else None
+                    )
                     missing.append(pane_id)
+                    mismatches[pane_id] = {
+                        "kind": "agent",
+                        "expected_agent": restore.get("agent"),
+                        "expected_session_id": restore.get("session_id"),
+                        "actual_agent": actual_record.get("agent")
+                        if isinstance(actual_record, dict)
+                        else None,
+                        "actual_session": actual_session,
+                    }
                 continue
-            result = api_request(socket_path, "pane.process_info", {"pane_id": pane_id})
-            info = result.get("process_info")
-            processes = info.get("foreground_processes") if isinstance(info, dict) else None
-            shell_pid = info.get("shell_pid") if isinstance(info, dict) else None
-            has_foreground_command = isinstance(processes, list) and any(
-                isinstance(process, dict) and process.get("pid") != shell_pid
-                for process in processes
+            expected_argv_value = restore.get("argv")
+            expected_argv = (
+                [str(value) for value in expected_argv_value]
+                if isinstance(expected_argv_value, list)
+                else []
             )
-            if not has_foreground_command:
+            process_info = pane_process_info(socket_path, pane_id)
+            actual_argvs = foreground_argvs(process_info)
+            if not expected_argv or not command_matches_process_info(process_info, restore):
                 missing.append(pane_id)
+                mismatches[pane_id] = {
+                    "kind": "command",
+                    "expected": expected_argv,
+                    "expected_executable": restore.get("executable"),
+                    "actual": actual_argvs,
+                }
         if not missing:
             return {
                 "ready": True,
                 "checked_at": now_iso(),
                 "expected_processes": len(expected),
                 "running_processes": len(expected),
-                "detected_agents": len(agent_by_pane),
+                "detected_agents": len(last_agent_records),
                 "missing": [],
+                "mismatches": {},
             }
         last_missing = missing
+        last_mismatches = mismatches
         time.sleep(1)
-    snapshot_value = api_request(socket_path, "session.snapshot", {})["snapshot"]
-    agents_value = snapshot_value.get("agents", [])
-    detected_agents = len(agents_value) if isinstance(agents_value, list) else 0
     return {
         "ready": False,
         "checked_at": now_iso(),
         "expected_processes": len(expected),
         "running_processes": len(expected) - len(last_missing),
-        "detected_agents": detected_agents,
+        "detected_agents": len(last_agent_records),
         "missing": last_missing,
+        "mismatches": last_mismatches,
     }
 
 
@@ -1722,9 +2058,11 @@ def cutover() -> None:
             socket_path,
             mapping["pane_map"],
         )
+        write_json(BUNDLE / "process-health-report.json", process_health)
         if not process_health["ready"]:
             raise RuntimeError(
-                f"restored panes did not start: {process_health['missing']}"
+                "restored processes did not match the manifest; inspect "
+                f"process-health-report.json: {process_health['missing']}"
             )
         result = {
             "completed_at": now_iso(),

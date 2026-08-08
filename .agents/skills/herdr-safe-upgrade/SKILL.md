@@ -31,7 +31,7 @@ The engine supports:
 
 It refuses multiple running sessions or unsupported live agent kinds. Extend and re-test rather than weakening those guards.
 
-An arbitrary process is restarted from its root argv and CWD; its RAM cannot be serialized. Agent conversations resume from durable session IDs. Scrollback is archived but not injected into recreated terminals.
+An arbitrary process is restarted from its resolved executable, root argv, and CWD; its RAM cannot be serialized. Agent conversations resume from durable session IDs. Scrollback is archived but not injected into recreated terminals.
 
 ## 1. Inspect before updating
 
@@ -120,14 +120,14 @@ The snapshot combines:
 - `session.snapshot` for global topology and focus
 - persisted workspace identity CWD, kept distinct from each pane's live CWD
 - raw `layout.export` for split trees, ratios, and per-pane CWD
-- `pane.process_info` plus process ancestry for root argv/CWD
+- `pane.process_info` plus process ancestry for root argv/CWD and the resolved executable path
 - Pi session headers, names, process start times, and resume events
 - `CLAUDE_CODE_SESSION_ID` plus the matching Claude JSONL
 - Herdr config/session/history backups and per-pane scrollback
 
-`self-test` starts the target server under a short isolated `/tmp` config, recreates the complete real topology with commands disabled, compares normalized layouts/focus/zoom, then stops and removes that server.
+`self-test` starts the target server with its Herdr config and sockets isolated under `/tmp`, while retaining the configured real `HOME` so shell hooks, direnv, and desktop-authenticated tools behave like cutover. It recreates the complete topology with captured commands disabled, waits for every new shell and its direnv/Nix initialization to settle, compares normalized layouts/focus/zoom, then stops and removes that server. Complete any expected 1Password prompt; an unresolved prompt must remain a hard failure.
 
-Workspace creation deserves special care: `workspace create --cwd` initializes both the workspace identity and its first tab's shell, but those CWDs can later diverge. The engine preserves the identity CWD, sends a safely quoted `cd` to the new first-tab shell when needed, and waits until `session.snapshot` reports the expected pane CWD before creating splits or restarting anything. A timeout is a hard failure.
+Workspace creation deserves special care: `workspace create --cwd` initializes both the workspace identity and its first tab's shell, but those CWDs can later diverge. The engine preserves the identity CWD, waits for shell startup hooks, sends a safely quoted `cd` to the new first-tab shell when needed, and waits until `session.snapshot` reports the expected pane CWD before creating splits or restarting anything. Every restored process is submitted only after its shell is the sole foreground process. A timeout is a hard failure.
 
 The engine replaces stale diagnostics on every run, writes `self-test-report.json` on success or failure, and preserves the isolated server output as `self-test-server.log`. Layout mismatches include normalized expected and actual trees so CWD, direction, or ratio differences are directly diagnosable.
 
@@ -161,8 +161,8 @@ The detached cutover:
 6. runs `switch_argv` and proves the active profile equals `new_generation`
 7. starts the target server and checks its protocol
 8. recreates topology and maps all new IDs from API responses
-9. resumes agents and restarts commands
-10. verifies topology and waits for every expected agent/process
+9. waits for shell/direnv initialization, then resumes agents and restarts commands
+10. verifies topology, exact agent session identities, and command executable/argv, rejecting stale agents and unrelated startup processes
 11. writes `success.json` or automatically attempts rollback
 
 ## 6. Verify after reconnect
@@ -179,11 +179,11 @@ Require:
 - target version and protocol on both client and server
 - expected workspace/tab/pane/agent counts
 - `process_health.ready: true`
-- no missing processes
+- no missing or mismatched processes in `process-health-report.json`
 - no lingering launchd job
 
 Keep the bundle, old generation, and old binary until the user confirms the restored state. Never delete or garbage-collect them automatically.
 
 ## Failure handling
 
-The engine records `failure.json`, stops whichever protocol is running, restores post-stop source state, activates `old_generation`, starts the old server, and restarts captured commands in the original pane IDs. Inspect `self-test-report.json`, `topology-verification-report.json`, `rollback.json`, and `cutover.log` as applicable; never discard the bundle while diagnosing.
+The engine records `failure.json`, stops whichever protocol is running, restores the source config and post-stop session state, activates `old_generation`, starts the old server, waits for the original pane IDs to stabilize, allows persisted agents to auto-resume, replaces stale or mismatched agent sessions, and restarts only missing processes after their shells are ready. Rollback also requires exact process health. Inspect `self-test-report.json`, `topology-verification-report.json`, `process-health-report.json`, `rollback-process-health-report.json`, `rollback.json`, and `cutover.log` as applicable; never discard the bundle while diagnosing.
