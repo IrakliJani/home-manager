@@ -8,6 +8,7 @@
     ../../modules/shell/oh-my-posh.nix
     ../../modules/shell/zsh.nix
     ../../modules/shell/tmux.nix
+    ../../modules/shell/herdr.nix
     ../../modules/shell/direnv.nix
     ../../modules/shell/tools.nix
     ../../modules/editor/nixvim
