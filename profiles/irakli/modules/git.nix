@@ -15,7 +15,7 @@ in
       key = signingKey;
       signByDefault = true;
       format = "ssh";
-      # signer set in modules/platform/darwin.nix
+      # Use ssh-keygen with the SSH agent selected by the session.
     };
 
     settings = {

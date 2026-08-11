@@ -1,6 +1,12 @@
-{ lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
+  onePasswordAgentSocket = "${config.home.homeDirectory}/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock";
   ghosttyTerminfoSource = ./ghostty.terminfo;
   ghosttyTerminfoSourceExists = builtins.pathExists ghosttyTerminfoSource;
   ghosttyTerminfo = pkgs.runCommand "ghostty-terminfo" { } ''
@@ -32,5 +38,17 @@ in
     "14d"
   ];
 
-  programs.git.signing.signer = "/Applications/1Password.app/Contents/MacOS/op-ssh-sign";
+  programs.ssh = {
+    enable = true;
+    enableDefaultConfig = false;
+    includes = [ "~/.orbstack/ssh/config" ];
+    settings."*".IdentityAgent = "SSH_AUTH_SOCK";
+  };
+
+  home.sessionVariablesExtra = lib.mkAfter ''
+    # Local shells use this Mac's 1Password agent; SSH sessions keep the forwarded agent.
+    if [ -z "''${SSH_CONNECTION-}" ]; then
+      export SSH_AUTH_SOCK=${lib.escapeShellArg onePasswordAgentSocket}
+    fi
+  '';
 }
