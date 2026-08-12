@@ -1,16 +1,17 @@
 ---
 name: herdr-safe-upgrade
-description: Safely upgrades Herdr across incompatible socket protocols while preserving and rebuilding every live workspace, tab, split pane, agent session, foreground command, label, ratio, zoom, and focus state. Use for Home Manager or Nix Herdr upgrades where switching the client would strand an older running server.
+description: Safely upgrades Herdr across incompatible socket protocols or preserves Herdr across a macOS reboot while rebuilding every live workspace, tab, split pane, agent session, foreground command, label, ratio, zoom, and focus state. Use for Home Manager or Nix Herdr upgrades where switching the client would strand an older running server, and for reboot-safe session recovery.
 compatibility: macOS, launchctl, Python 3.9+, Herdr socket API, Nix/Home Manager
 ---
 
-# Herdr Safe Upgrade
+# Herdr Safe Upgrade and Reboot Recovery
 
-Use a declarative manifest and a detached one-shot cutover. Never rely on a new Herdr client talking to an old-protocol server.
+Use a declarative manifest and a detached one-shot cutover for upgrades. Use the manual reboot helper for same-version macOS restarts. Never rely on a new Herdr client talking to an old-protocol server.
 
 ## Safety invariants
 
-- Require explicit approval before stopping Herdr or activating the new Home Manager generation.
+- Require explicit approval before stopping Herdr, activating the new Home Manager generation, or rebooting macOS.
+- Prepare reboot recovery from a real Herdr pane with `HERDR_ENV=1`. Run post-reboot restoration from Terminal or Ghostty outside Herdr because it may stop a post-login Herdr server.
 - Capture the absolute old Herdr binary before switching. Keep its Nix store path and the old Home Manager generation until verification succeeds.
 - Build the target generation without activating it. Only run local commands such as `--version`, `status client`, and `api schema` with the target binary before cutover. Strip every inherited `HERDR_*` variable and never point it at the old socket.
 - Build and activate the exact same Git-visible source. Git-backed flakes omit untracked files; do not let the repository or lock file drift after the verified build.
@@ -30,6 +31,8 @@ The engine supports:
 - protocol-independent reconstruction through stable CLI/API operations
 
 It refuses multiple running sessions or unsupported live agent kinds. Extend and re-test rather than weakening those guards.
+
+The companion reboot helper supports only an identical source and target Herdr binary, version, and protocol. Use the upgrade cutover—not reboot recovery—when any of those change.
 
 An arbitrary process is restarted from its resolved executable, root argv, and CWD; its RAM cannot be serialized. Agent conversations resume from durable session IDs. Scrollback is archived but not injected into recreated terminals.
 
@@ -80,7 +83,7 @@ Verify the build and accompanying package changes before migration. Record `TARG
 
 ## 3. Create the private bundle
 
-The migration engine derives its bundle from its own parent directory, so copy both scripts into the bundle root. Do not run the engine in this skill directory.
+The migration engine derives its bundle from its own parent directory, so copy all scripts into the bundle root. Do not run the engine in this skill directory.
 
 ```bash
 SKILL_DIR=$(git rev-parse --show-toplevel)/.agents/skills/herdr-safe-upgrade
@@ -89,6 +92,7 @@ BUNDLE="$HOME/.local/state/herdr/migrations/${STAMP}-SOURCE-to-TARGET"
 mkdir -p -m 700 "$BUNDLE"
 install -m 700 "$SKILL_DIR/scripts/herdr_migrate.py" "$BUNDLE/herdr_migrate.py"
 install -m 700 "$SKILL_DIR/scripts/cutover-wrapper.sh" "$BUNDLE/cutover-wrapper.sh"
+install -m 700 "$SKILL_DIR/scripts/restore-after-reboot.py" "$BUNDLE/restore-after-reboot.py"
 install -m 600 "$SKILL_DIR/assets/migration-config.example.json" "$BUNDLE/migration-config.json"
 ```
 
@@ -183,6 +187,56 @@ Require:
 - no lingering launchd job
 
 Keep the bundle, old generation, and old binary until the user confirms the restored state. Never delete or garbage-collect them automatically.
+
+## Same-version macOS reboot recovery
+
+Use this flow when a reboot will kill every pane process but Herdr itself is not changing. Do not run the upgrade `cutover` command.
+
+### Prepare inside Herdr
+
+Confirm `HERDR_ENV=1`, inspect the live session as in step 1, then create a private bundle as in step 3. Name it for reboot recovery, for example:
+
+```bash
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+BUNDLE="$HOME/.local/state/herdr/migrations/${STAMP}-HERDR_VERSION-reboot"
+```
+
+In `migration-config.json`, set `old_binary` and `new_binary` to the same absolute Nix store binary. Set both versions and both protocols identically. Use `["/usr/bin/true"]` for `switch_argv`; reboot recovery never executes it. Keep the real generation, profile, `HOME`, and `PATH` values so the binary remains rooted and resumed shells have the original command environment.
+
+Prepare and inspect the bundle:
+
+```bash
+"$BUNDLE/restore-after-reboot.py" prepare
+"$BUNDLE/restore-after-reboot.py" check
+cat "$BUNDLE/reboot-ready.json"
+```
+
+`prepare` takes and validates the manifest, archives scrollback, backs up runtime files, and runs the isolated topology self-test. Require `prepared: true`, exact live counts, and no validation errors. Do not create, close, move, split, or relabel panes after preparation; if topology changes, run `prepare` again before rebooting.
+
+Get explicit approval before the user reboots. Do not install an automatic login job by default. Do not garbage-collect before recovery.
+
+### Restore manually after reboot
+
+Before opening Herdr, use Terminal or Ghostty outside Herdr:
+
+```bash
+BUNDLE="$HOME/.local/state/herdr/migrations/TIMESTAMP-HERDR_VERSION-reboot"
+"$BUNDLE/restore-after-reboot.py" restore
+```
+
+The helper uses a one-shot lock, archives any post-login session state, starts an empty server with the captured absolute binary, reconstructs topology, resumes agents and commands, restores zoom/focus, and verifies every expected process. If Herdr started automatically at login, the helper safely stops that matching server first.
+
+Verify before using the restored session:
+
+```bash
+cat "$BUNDLE/reboot-success.json"
+herdr status
+herdr session list --json
+```
+
+Require matching version/protocol, expected topology counts, and `process_health.ready: true`. Keep the private bundle until the user confirms every pane. Archived scrollback remains available in the bundle but is not injected into new terminals.
+
+If restoration fails, do not delete `reboot-restore.lock` or rerun blindly. The helper writes `reboot-failure.json`, attempts to restore the archived post-reboot session state, restarts commands in original pane IDs, and records `reboot-rollback.json`. Inspect those files and `reboot-server.log` first.
 
 ## Failure handling
 
