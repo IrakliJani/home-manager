@@ -301,13 +301,42 @@ def index_pi_sessions() -> list[dict[str, object]]:
     return sessions
 
 
+def detected_pi_session_path(agent: dict[str, object], pane_id: str) -> str | None:
+    detected = agent.get("agent_session")
+    if detected is None:
+        return None
+    if not isinstance(detected, dict):
+        raise RuntimeError(f"Pi pane {pane_id} has invalid detected session metadata")
+    if detected.get("agent") != "pi" or detected.get("kind") != "path":
+        raise RuntimeError(f"Pi pane {pane_id} has unsupported detected session metadata")
+    path = detected.get("value")
+    if not isinstance(path, str) or not os.path.isabs(path):
+        raise RuntimeError(f"Pi pane {pane_id} has invalid detected session path")
+    return path
+
+
 def resolve_pi_session(
     argv: list[str],
     cwd: str,
     started_at: datetime,
     sessions: list[dict[str, object]],
+    detected_path: str | None = None,
 ) -> tuple[dict[str, object] | None, str]:
     same_cwd = [session for session in sessions if session.get("cwd") == cwd]
+    detected: dict[str, object] | None = None
+    if detected_path:
+        matches = [session for session in sessions if session.get("path") == detected_path]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"detected Pi session {detected_path!r} resolved to {len(matches)} files"
+            )
+        detected = matches[0]
+        if detected.get("cwd") != cwd:
+            raise RuntimeError(
+                f"detected Pi session cwd differs from process cwd: "
+                f"{detected.get('cwd')!r} != {cwd!r}"
+            )
+
     explicit = option_value(argv, "--session")
     if explicit:
         matches = [
@@ -322,7 +351,12 @@ def resolve_pi_session(
         ]
         if len(matches) != 1:
             raise RuntimeError(f"Pi --session {explicit!r} resolved to {len(matches)} files")
-        return matches[0], "explicit"
+        if detected is not None and detected.get("id") != matches[0].get("id"):
+            raise RuntimeError("Pi argv and detected session metadata disagree")
+        return matches[0], "explicit-and-agent-session" if detected else "explicit"
+
+    if detected is not None:
+        return detected, "agent-session"
 
     requested_name = option_value(argv, "--name") or option_value(argv, "-n")
     if requested_name:
@@ -584,6 +618,7 @@ def snapshot(output: Path, archive_scrollback: bool) -> dict[str, object]:
                     root_cwd,
                     process_start(root_pid),
                     pi_sessions,
+                    detected_pi_session_path(agent, pane_id),
                 )
                 session_id = session.get("id") if session else None
                 session_path = session.get("path") if session else None
