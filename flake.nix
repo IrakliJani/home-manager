@@ -31,6 +31,7 @@
 
       profileModules = {
         "${defaultProfile}" = ./profiles/irakli;
+        base = ./profiles/_shared;
         claw = ./profiles/claw;
       };
 
@@ -56,14 +57,20 @@
         {
           system,
           profile ? defaultProfile,
+          username ? profile,
+          extraModules ? [ ],
         }:
         {
-          imports = [
-            nixvim.homeModules.nixvim
-            hunk.homeManagerModules.default
-            (mkProfileModule profile)
-            (mkPlatformModule system)
-          ];
+          imports =
+            [
+              nixvim.homeModules.nixvim
+              hunk.homeManagerModules.default
+              (mkProfileModule profile)
+              (mkPlatformModule system)
+            ]
+            ++ extraModules;
+
+          home.username = username;
         };
 
       overlays = [
@@ -103,10 +110,12 @@
           value =
             {
               profile ? defaultProfile,
+              username ? profile,
+              extraModules ? [ ],
             }:
             mkHomeModule {
               system = platforms.${platform};
-              inherit profile;
+              inherit profile username extraModules;
             };
         }) platformNames
       );

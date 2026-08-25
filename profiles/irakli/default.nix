@@ -5,6 +5,4 @@
     ../_shared
     ./modules/git.nix
   ];
-
-  home.username = "irakli";
 }

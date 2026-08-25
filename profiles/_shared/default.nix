@@ -15,7 +15,7 @@
     ../../modules/editor/helix.nix
   ];
 
-  # home.username is set by profile modules (e.g. profiles/irakli, profiles/claw)
+  # home.username is set by the flake's profile constructor.
   # home.homeDirectory is set by modules/platform/{darwin,linux}.nix
   home.stateVersion = "26.05";
 
