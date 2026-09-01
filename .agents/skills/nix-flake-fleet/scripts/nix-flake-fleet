@@ -1,0 +1,908 @@
+#!/usr/bin/env python3
+"""Discover and maintain Nix flakes under a project tree."""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import datetime as dt
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Iterable, Sequence
+
+DEFAULT_ROOT = Path.home() / "code"
+EXCLUDED_DIR_NAMES = {
+    ".cache",
+    ".direnv",
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "result",
+    "target",
+}
+ASSIGNMENT_RE = re.compile(r'(?:inputs\.)?nixpkgs\.url\s*=\s*"')
+GITHUB_NIXPKGS_RE = re.compile(
+    r"github:(?P<owner>nixos)/nixpkgs"
+    r"(?:/(?P<path_ref>[^?#]+)|\?ref=(?P<query_ref>[^&#]+))?",
+    re.IGNORECASE,
+)
+NIXOS_FLAKE_RE = re.compile(r"\b(?:nixosConfigurations|nixosSystem)\b")
+VALID_UNSTABLE_REFS = ("auto", "nixos-unstable", "nixpkgs-unstable")
+
+
+@dataclasses.dataclass(frozen=True)
+class InputAssignment:
+    url_start: int
+    url_end: int
+    url: str
+    ref: str | None
+    supported: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class GitInfo:
+    root: Path | None
+    flake_tracked: bool
+    input_files_dirty: bool
+    status_lines: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class Candidate:
+    directory: Path
+    flake: Path
+    lock: Path
+    source: str | None
+    read_error: str | None
+    assignments: tuple[InputAssignment, ...]
+    git: GitInfo
+
+
+@dataclasses.dataclass(frozen=True)
+class RewritePlan:
+    candidate: Candidate
+    rewritten_source: str | None
+    changes: tuple[tuple[str, str], ...]
+    unsupported_urls: tuple[str, ...]
+    target_ref: str
+
+    @property
+    def needs_rewrite(self) -> bool:
+        return bool(self.changes)
+
+
+@dataclasses.dataclass(frozen=True)
+class FileSnapshot:
+    existed: bool
+    data: bytes | None
+    mode: int | None
+
+
+def display_path(path: Path) -> str:
+    try:
+        return f"~/{path.resolve().relative_to(Path.home().resolve())}"
+    except (OSError, ValueError):
+        return str(path)
+
+
+def sha256_bytes(data: bytes | None) -> str | None:
+    if data is None:
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def discover_flakes(root: Path) -> tuple[list[Path], list[str]]:
+    flakes: list[Path] = []
+    errors: list[str] = []
+
+    def on_error(error: OSError) -> None:
+        errors.append(str(error))
+
+    for current, directories, filenames in os.walk(root, followlinks=False, onerror=on_error):
+        directories[:] = sorted(
+            name
+            for name in directories
+            if name not in EXCLUDED_DIR_NAMES
+            and not (Path(current) / name).is_symlink()
+        )
+        if "flake.nix" in filenames:
+            flakes.append(Path(current) / "flake.nix")
+
+    return sorted(flakes), errors
+
+
+def skip_double_quoted_string(source: str, start: int) -> int:
+    index = start + 1
+    while index < len(source):
+        if source[index] == "\\":
+            index += 2
+            continue
+        if source[index] == '"':
+            return index + 1
+        index += 1
+    return len(source)
+
+
+def skip_indented_string(source: str, start: int) -> int:
+    index = start + 2
+    while index < len(source):
+        if source.startswith("'''", index):
+            index += 3
+            continue
+        if source.startswith("''", index):
+            return index + 2
+        index += 1
+    return len(source)
+
+
+def skip_block_comment(source: str, start: int) -> int:
+    depth = 1
+    index = start + 2
+    while index < len(source) and depth:
+        if source.startswith("/*", index):
+            depth += 1
+            index += 2
+        elif source.startswith("*/", index):
+            depth -= 1
+            index += 2
+        else:
+            index += 1
+    return index
+
+
+def parse_supported_url(url: str) -> tuple[bool, str | None]:
+    match = GITHUB_NIXPKGS_RE.fullmatch(url)
+    if not match:
+        return False, None
+    return True, match.group("path_ref") or match.group("query_ref")
+
+
+def find_nixpkgs_assignments(source: str) -> tuple[InputAssignment, ...]:
+    """Find direct nixpkgs.url assignments while ignoring comments and strings."""
+    assignments: list[InputAssignment] = []
+    index = 0
+
+    while index < len(source):
+        if source[index] == "#":
+            newline = source.find("\n", index + 1)
+            index = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            index = skip_block_comment(source, index)
+            continue
+        if source.startswith("''", index):
+            index = skip_indented_string(source, index)
+            continue
+        if source[index] == '"':
+            index = skip_double_quoted_string(source, index)
+            continue
+
+        match = ASSIGNMENT_RE.match(source, index)
+        if match and (index == 0 or source[index - 1] not in ".-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"):
+            url_start = match.end()
+            quote_end = skip_double_quoted_string(source, url_start - 1) - 1
+            if quote_end < url_start or quote_end >= len(source):
+                index = len(source)
+                continue
+            url = source[url_start:quote_end]
+            supported, ref = parse_supported_url(url)
+            assignments.append(
+                InputAssignment(
+                    url_start=url_start,
+                    url_end=quote_end,
+                    url=url,
+                    ref=ref,
+                    supported=supported,
+                )
+            )
+            index = quote_end + 1
+            continue
+
+        index += 1
+
+    return tuple(assignments)
+
+
+def run_git(arguments: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *arguments],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+
+
+def inspect_git(directory: Path, flake: Path, lock: Path) -> GitInfo:
+    if shutil.which("git") is None:
+        return GitInfo(None, False, False, ())
+
+    root_result = run_git(["rev-parse", "--show-toplevel"], directory)
+    if root_result.returncode != 0:
+        return GitInfo(None, False, False, ())
+
+    root = Path(root_result.stdout.strip()).resolve()
+    try:
+        flake_relative = flake.resolve().relative_to(root)
+        lock_relative = lock.resolve().relative_to(root)
+    except ValueError:
+        return GitInfo(root, False, False, ())
+
+    tracked_result = run_git(
+        ["ls-files", "--error-unmatch", "--", str(flake_relative)], root
+    )
+    status_result = run_git(
+        [
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            str(flake_relative),
+            str(lock_relative),
+        ],
+        root,
+    )
+    status_lines = tuple(
+        line for line in status_result.stdout.splitlines() if line.strip()
+    )
+    return GitInfo(
+        root=root,
+        flake_tracked=tracked_result.returncode == 0,
+        input_files_dirty=bool(status_lines),
+        status_lines=status_lines,
+    )
+
+
+def inspect_candidate(flake: Path) -> Candidate:
+    directory = flake.parent
+    lock = directory / "flake.lock"
+    source: str | None
+    error: str | None
+    assignments: tuple[InputAssignment, ...]
+    try:
+        source = flake.read_text(encoding="utf-8")
+        error = None
+        assignments = find_nixpkgs_assignments(source)
+    except (OSError, UnicodeError) as exception:
+        source = None
+        error = str(exception)
+        assignments = ()
+
+    return Candidate(
+        directory=directory,
+        flake=flake,
+        lock=lock,
+        source=source,
+        read_error=error,
+        assignments=assignments,
+        git=inspect_git(directory, flake, lock),
+    )
+
+
+def inspect_all(root: Path) -> tuple[list[Candidate], list[str]]:
+    flakes, errors = discover_flakes(root)
+    return [inspect_candidate(flake) for flake in flakes], errors
+
+
+def filter_candidates(
+    candidates: Sequence[Candidate], root: Path, patterns: Sequence[str]
+) -> list[Candidate]:
+    if not patterns:
+        return list(candidates)
+
+    selected: list[Candidate] = []
+    for candidate in candidates:
+        relative = str(candidate.directory.relative_to(root)) or "."
+        if any(
+            fnmatch.fnmatchcase(relative, pattern)
+            or fnmatch.fnmatchcase(str(candidate.directory), pattern)
+            for pattern in patterns
+        ):
+            selected.append(candidate)
+    return selected
+
+
+def is_unstable(ref: str | None) -> bool:
+    return ref is not None and "unstable" in ref.lower()
+
+
+def target_ref_for(source: str, requested: str) -> str:
+    if requested != "auto":
+        return requested
+    return "nixos-unstable" if NIXOS_FLAKE_RE.search(source) else "nixpkgs-unstable"
+
+
+def make_rewrite_plan(
+    candidate: Candidate, requested_ref: str, normalize: bool
+) -> RewritePlan:
+    source = candidate.source
+    if source is None:
+        return RewritePlan(candidate, None, (), (), requested_ref)
+
+    target_ref = target_ref_for(source, requested_ref)
+    target_url = f"github:NixOS/nixpkgs/{target_ref}"
+    replacements: list[tuple[int, int, str]] = []
+    changes: list[tuple[str, str]] = []
+    unsupported: list[str] = []
+
+    for assignment in candidate.assignments:
+        if not assignment.supported:
+            unsupported.append(assignment.url)
+            continue
+        if is_unstable(assignment.ref) and not normalize:
+            continue
+        if assignment.url == target_url:
+            continue
+        replacements.append((assignment.url_start, assignment.url_end, target_url))
+        changes.append((assignment.url, target_url))
+
+    rewritten = source
+    for start, end, replacement in reversed(replacements):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
+
+    return RewritePlan(
+        candidate=candidate,
+        rewritten_source=rewritten,
+        changes=tuple(changes),
+        unsupported_urls=tuple(unsupported),
+        target_ref=target_ref,
+    )
+
+
+def git_label(candidate: Candidate) -> str:
+    if candidate.git.root is None:
+        return "no-git"
+    if candidate.git.input_files_dirty:
+        return "dirty"
+    return "clean"
+
+
+def input_label(candidate: Candidate) -> str:
+    if candidate.read_error:
+        return "unreadable"
+    if not candidate.assignments:
+        return "none"
+    labels: list[str] = []
+    for assignment in candidate.assignments:
+        if not assignment.supported:
+            labels.append(f"unsupported:{assignment.url}")
+        else:
+            labels.append(assignment.ref or "default")
+    return ",".join(labels)
+
+
+def candidate_as_dict(candidate: Candidate) -> dict[str, object]:
+    return {
+        "path": str(candidate.directory),
+        "flake": str(candidate.flake),
+        "lock_exists": candidate.lock.exists(),
+        "nixpkgs": [
+            {
+                "url": assignment.url,
+                "ref": assignment.ref,
+                "supported": assignment.supported,
+            }
+            for assignment in candidate.assignments
+        ],
+        "read_error": candidate.read_error,
+        "git_root": str(candidate.git.root) if candidate.git.root else None,
+        "flake_tracked": candidate.git.flake_tracked,
+        "input_files_dirty": candidate.git.input_files_dirty,
+        "git_status": list(candidate.git.status_lines),
+    }
+
+
+def print_discovery_errors(errors: Iterable[str]) -> None:
+    for error in errors:
+        print(f"warning: discovery error: {error}", file=sys.stderr)
+
+
+def print_list(candidates: Sequence[Candidate], root: Path, as_json: bool) -> None:
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "root": str(root),
+                    "count": len(candidates),
+                    "candidates": [candidate_as_dict(item) for item in candidates],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    print(f"Found {len(candidates)} flake candidates under {display_path(root)}")
+    print(f"{'LOCK':<5} {'NIXPKGS':<22} {'GIT':<7} PATH")
+    for candidate in candidates:
+        lock = "yes" if candidate.lock.exists() else "no"
+        print(
+            f"{lock:<5} {input_label(candidate):<22} "
+            f"{git_label(candidate):<7} {display_path(candidate.directory)}"
+        )
+
+
+def plan_status(plan: RewritePlan) -> tuple[str, str]:
+    candidate = plan.candidate
+    if candidate.read_error:
+        return "ERROR", candidate.read_error
+    if plan.changes:
+        rendered = ", ".join(
+            f"{old} -> {new}" for old, new in plan.changes
+        )
+        return "CHANGE", rendered
+    if plan.unsupported_urls:
+        return "REVIEW", ", ".join(plan.unsupported_urls)
+    if not candidate.assignments:
+        return "UPDATE", "no direct nixpkgs.url"
+    return "KEEP", input_label(candidate)
+
+
+def print_plan(
+    candidates: Sequence[Candidate],
+    root: Path,
+    requested_ref: str,
+    normalize: bool,
+) -> list[RewritePlan]:
+    plans = [
+        make_rewrite_plan(candidate, requested_ref, normalize)
+        for candidate in candidates
+    ]
+    print(f"Plan for {len(plans)} flake candidates under {display_path(root)}")
+    for plan in plans:
+        status, detail = plan_status(plan)
+        dirty = " [dirty flake/lock]" if plan.candidate.git.input_files_dirty else ""
+        print(
+            f"{status:<7} {display_path(plan.candidate.directory)}{dirty}"
+            f" — {detail}"
+        )
+
+    changed = sum(plan.needs_rewrite for plan in plans)
+    keep = sum(plan_status(plan)[0] == "KEEP" for plan in plans)
+    update_only = sum(plan_status(plan)[0] == "UPDATE" for plan in plans)
+    review = sum(plan_status(plan)[0] == "REVIEW" for plan in plans)
+    errors = sum(plan_status(plan)[0] == "ERROR" for plan in plans)
+    dirty = sum(plan.candidate.git.input_files_dirty for plan in plans)
+    missing_locks = sum(not plan.candidate.lock.exists() for plan in plans)
+    print(
+        "Summary: "
+        f"{changed} rewrite, {keep} already unstable, "
+        f"{update_only} update-only, {review} review, {errors} error; "
+        f"{dirty} dirty flake/lock; {missing_locks} lock files will be created."
+    )
+    print("A sync updates every flake lock, including inputs other than nixpkgs.")
+    return plans
+
+
+def snapshot_file(path: Path) -> FileSnapshot:
+    if not path.exists():
+        return FileSnapshot(False, None, None)
+    file_stat = path.stat()
+    return FileSnapshot(True, path.read_bytes(), stat.S_IMODE(file_stat.st_mode))
+
+
+def atomic_write(path: Path, data: bytes, mode: int) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def restore_file(path: Path, snapshot: FileSnapshot) -> None:
+    if not snapshot.existed:
+        if path.exists() or path.is_symlink():
+            path.unlink()
+        return
+    assert snapshot.data is not None
+    assert snapshot.mode is not None
+    atomic_write(path, snapshot.data, snapshot.mode)
+
+
+def create_run_directory() -> Path:
+    state_home = Path(
+        os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+    ).expanduser()
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run = state_home / "nix-flake-fleet" / "runs" / f"{stamp}-{os.getpid()}"
+    run.mkdir(parents=True, mode=0o700)
+    os.chmod(run, 0o700)
+    return run
+
+
+def write_json(path: Path, value: object) -> None:
+    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+    if path.exists():
+        mode = stat.S_IMODE(path.stat().st_mode)
+    else:
+        mode = 0o600
+    atomic_write(path, payload, mode)
+
+
+def backup_candidate(
+    run: Path,
+    root: Path,
+    candidate: Candidate,
+    flake_snapshot: FileSnapshot,
+    lock_snapshot: FileSnapshot,
+) -> Path:
+    relative = candidate.directory.relative_to(root)
+    destination = run / "backups" / relative
+    destination.mkdir(parents=True, exist_ok=True)
+    if flake_snapshot.existed and flake_snapshot.data is not None:
+        (destination / "flake.nix").write_bytes(flake_snapshot.data)
+    if lock_snapshot.existed and lock_snapshot.data is not None:
+        (destination / "flake.lock").write_bytes(lock_snapshot.data)
+    else:
+        (destination / "flake.lock.absent").write_text("lock did not exist\n")
+    return destination
+
+
+def safe_log_name(index: int, candidate: Candidate, root: Path) -> str:
+    relative = str(candidate.directory.relative_to(root)) or "root"
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", relative)
+    return f"{index:03d}-{slug}.log"
+
+
+def flake_reference(candidate: Candidate) -> str:
+    if candidate.git.root is not None and not candidate.git.flake_tracked:
+        return f"path:{candidate.directory}"
+    return str(candidate.directory)
+
+
+def tail(text: str, line_count: int = 12) -> str:
+    lines = text.rstrip().splitlines()
+    return "\n".join(lines[-line_count:])
+
+
+def apply_fleet(
+    *,
+    root: Path,
+    plans: Sequence[RewritePlan],
+    include_dirty: bool,
+    timeout: int,
+    fail_fast: bool,
+    rewrite: bool,
+) -> int:
+    if shutil.which("nix") is None:
+        print("error: nix is not available on PATH", file=sys.stderr)
+        return 1
+
+    run = create_run_directory()
+    logs = run / "logs"
+    logs.mkdir()
+    report_path = run / "report.json"
+    report: dict[str, object] = {
+        "root": str(root),
+        "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "status": "running",
+        "include_dirty": include_dirty,
+        "rewrite": rewrite,
+        "results": [],
+    }
+    write_json(report_path, report)
+    results: list[dict[str, object]] = report["results"]  # type: ignore[assignment]
+
+    print(f"Run data: {display_path(run)}")
+    failures = 0
+    skipped = 0
+    successes = 0
+
+    for index, plan in enumerate(plans, start=1):
+        candidate = plan.candidate
+        shown = display_path(candidate.directory)
+        prefix = f"[{index}/{len(plans)}]"
+        result: dict[str, object] = {
+            "path": str(candidate.directory),
+            "changes": [list(change) for change in plan.changes] if rewrite else [],
+        }
+
+        if candidate.read_error:
+            failures += 1
+            result.update(status="failed", error=candidate.read_error)
+            results.append(result)
+            write_json(report_path, report)
+            print(f"{prefix} FAILED  {shown} — {candidate.read_error}")
+            if fail_fast:
+                break
+            continue
+
+        if candidate.git.input_files_dirty and not include_dirty:
+            skipped += 1
+            result.update(
+                status="skipped-dirty",
+                git_status=list(candidate.git.status_lines),
+            )
+            results.append(result)
+            write_json(report_path, report)
+            print(f"{prefix} SKIPPED {shown} — flake.nix or flake.lock is dirty")
+            if fail_fast:
+                break
+            continue
+
+        flake_snapshot = snapshot_file(candidate.flake)
+        lock_snapshot = snapshot_file(candidate.lock)
+        backup = backup_candidate(
+            run, root, candidate, flake_snapshot, lock_snapshot
+        )
+        result.update(
+            backup=str(backup),
+            flake_sha256_before=sha256_bytes(flake_snapshot.data),
+            lock_sha256_before=sha256_bytes(lock_snapshot.data),
+        )
+
+        command = [
+            "nix",
+            "flake",
+            "update",
+            "--flake",
+            flake_reference(candidate),
+        ]
+        log_path = logs / safe_log_name(index, candidate, root)
+        result["log"] = str(log_path)
+
+        try:
+            if rewrite and plan.needs_rewrite:
+                assert plan.rewritten_source is not None
+                assert flake_snapshot.mode is not None
+                atomic_write(
+                    candidate.flake,
+                    plan.rewritten_source.encode("utf-8"),
+                    flake_snapshot.mode,
+                )
+
+            completed = subprocess.run(
+                command,
+                cwd=candidate.directory,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+            )
+            output = completed.stdout
+            log_path.write_text(
+                f"$ {shlex.join(command)}\n\n{output}", encoding="utf-8"
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"nix flake update exited {completed.returncode}"
+                )
+        except subprocess.TimeoutExpired as exception:
+            output = exception.stdout or ""
+            if isinstance(output, bytes):
+                output = output.decode(errors="replace")
+            log_path.write_text(
+                f"$ {shlex.join(command)}\n\n{output}\n\nTIMEOUT after {timeout}s\n",
+                encoding="utf-8",
+            )
+            restore_file(candidate.flake, flake_snapshot)
+            restore_file(candidate.lock, lock_snapshot)
+            failures += 1
+            result.update(status="failed", error=f"timeout after {timeout}s")
+            results.append(result)
+            write_json(report_path, report)
+            print(f"{prefix} FAILED  {shown} — timeout; restored original files")
+            if fail_fast:
+                break
+            continue
+        except (OSError, RuntimeError) as exception:
+            restore_file(candidate.flake, flake_snapshot)
+            restore_file(candidate.lock, lock_snapshot)
+            failures += 1
+            result.update(status="failed", error=str(exception))
+            results.append(result)
+            write_json(report_path, report)
+            print(f"{prefix} FAILED  {shown} — {exception}; restored original files")
+            if log_path.exists():
+                log_tail = tail(log_path.read_text(encoding="utf-8", errors="replace"))
+                if log_tail:
+                    print(log_tail, file=sys.stderr)
+            if fail_fast:
+                break
+            continue
+        except BaseException:
+            restore_file(candidate.flake, flake_snapshot)
+            restore_file(candidate.lock, lock_snapshot)
+            raise
+
+        successes += 1
+        result.update(
+            status="updated",
+            flake_sha256_after=sha256_bytes(candidate.flake.read_bytes()),
+            lock_sha256_after=(
+                sha256_bytes(candidate.lock.read_bytes())
+                if candidate.lock.exists()
+                else None
+            ),
+        )
+        results.append(result)
+        write_json(report_path, report)
+        changed = " + unstable ref" if rewrite and plan.needs_rewrite else ""
+        print(f"{prefix} UPDATED  {shown}{changed}")
+
+    report.update(
+        status="complete" if failures == 0 and skipped == 0 else "incomplete",
+        finished_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+        summary={
+            "updated": successes,
+            "failed": failures,
+            "skipped": skipped,
+            "discovered": len(plans),
+        },
+    )
+    write_json(report_path, report)
+    print(
+        f"Summary: {successes} updated, {failures} failed, {skipped} skipped. "
+        f"Report: {display_path(report_path)}"
+    )
+    return 1 if failures or skipped else 0
+
+
+def add_target_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--unstable-ref",
+        choices=VALID_UNSTABLE_REFS,
+        default="auto",
+        help=(
+            "target ref; auto uses nixos-unstable for NixOS flakes and "
+            "nixpkgs-unstable for other flakes (default: auto)"
+        ),
+    )
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help="also rewrite existing unstable refs to the selected target",
+    )
+
+
+def add_apply_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="perform updates; without this flag only a preview is shown",
+    )
+    parser.add_argument(
+        "--include-dirty",
+        action="store_true",
+        help="update candidates whose flake.nix or flake.lock is already dirty",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        metavar="SECONDS",
+        help="timeout for each flake update (default: 600)",
+    )
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="stop after the first failure or skipped dirty candidate",
+    )
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="nix-flake-fleet",
+        description="List and update Nix flake projects under ~/code.",
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=DEFAULT_ROOT,
+        help="project tree to scan (default: ~/code)",
+    )
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help=(
+            "select a root-relative path glob; repeat for multiple paths "
+            "(place before the command)"
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    list_parser = subparsers.add_parser("list", help="list flake candidates")
+    list_parser.add_argument("--json", action="store_true", help="emit JSON")
+
+    plan_parser = subparsers.add_parser(
+        "plan", help="preview unstable-ref rewrites and lock updates"
+    )
+    add_target_options(plan_parser)
+
+    sync_parser = subparsers.add_parser(
+        "sync", help="move direct nixpkgs inputs to unstable and update all locks"
+    )
+    add_target_options(sync_parser)
+    add_apply_options(sync_parser)
+
+    update_parser = subparsers.add_parser(
+        "update", help="update every lock without rewriting flake.nix"
+    )
+    add_apply_options(update_parser)
+
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    root = args.root.expanduser().resolve()
+    if not root.is_dir():
+        print(f"error: root is not a directory: {root}", file=sys.stderr)
+        return 2
+
+    discovered, discovery_errors = inspect_all(root)
+    print_discovery_errors(discovery_errors)
+    candidates = filter_candidates(discovered, root, args.only)
+    if args.only and not candidates:
+        print(
+            f"error: --only matched no flake candidates: {', '.join(args.only)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.command == "list":
+        print_list(candidates, root, args.json)
+        return 0
+
+    if args.command == "plan":
+        print_plan(candidates, root, args.unstable_ref, args.normalize)
+        return 0
+
+    if args.command == "sync":
+        plans = print_plan(candidates, root, args.unstable_ref, args.normalize)
+        if not args.apply:
+            print("Preview only; no files changed. Add --apply to run the sync.")
+            return 0
+        return apply_fleet(
+            root=root,
+            plans=plans,
+            include_dirty=args.include_dirty,
+            timeout=args.timeout,
+            fail_fast=args.fail_fast,
+            rewrite=True,
+        )
+
+    if args.command == "update":
+        print_list(candidates, root, as_json=False)
+        if not args.apply:
+            print("Preview only; no files changed. Add --apply to update all locks.")
+            return 0
+        plans = [make_rewrite_plan(candidate, "auto", False) for candidate in candidates]
+        return apply_fleet(
+            root=root,
+            plans=plans,
+            include_dirty=args.include_dirty,
+            timeout=args.timeout,
+            fail_fast=args.fail_fast,
+            rewrite=False,
+        )
+
+    raise AssertionError(f"unknown command: {args.command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

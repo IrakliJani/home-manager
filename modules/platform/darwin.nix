@@ -41,8 +41,10 @@ in
   programs.ssh = {
     enable = true;
     enableDefaultConfig = false;
-    includes = [ "~/.orbstack/ssh/config" ];
-    settings."*".IdentityAgent = "SSH_AUTH_SOCK";
+    includes = [
+      "~/.orbstack/ssh/config"
+      "~/.ssh/config.local"
+    ];
   };
 
   home.sessionVariablesExtra = lib.mkAfter ''

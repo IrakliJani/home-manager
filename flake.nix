@@ -11,7 +11,6 @@
     nixvim.inputs.nixpkgs.follows = "nixpkgs";
 
     llm-agents.url = "github:numtide/llm-agents.nix";
-    llm-agents.inputs.nixpkgs.follows = "nixpkgs";
 
     hunk.url = "github:modem-dev/hunk";
     hunk.inputs.nixpkgs.follows = "nixpkgs";
@@ -67,19 +66,12 @@
         };
 
       overlays = [
-        llm-agents.overlays.shared-nixpkgs
+        (_final: prev: {
+          llm-agents = llm-agents.packages.${prev.stdenv.hostPlatform.system};
+        })
       ];
 
-      unfreePackages = [
-        "ungoogled-chromium"
-      ];
-
-      mkPkgs =
-        system:
-        import nixpkgs {
-          inherit system overlays;
-          config.allowUnfreePredicate = pkg: builtins.elem (nixpkgs.lib.getName pkg) unfreePackages;
-        };
+      mkPkgs = system: import nixpkgs { inherit system overlays; };
 
       mkHome =
         {
