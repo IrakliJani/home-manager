@@ -2,12 +2,12 @@
   description = "Home Manager configuration of irakli";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-26.05-darwin";
+    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
 
-    home-manager.url = "github:nix-community/home-manager/release-26.05";
+    home-manager.url = "github:nix-community/home-manager/master";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
 
-    nixvim.url = "github:nix-community/nixvim/nixos-26.05";
+    nixvim.url = "github:nix-community/nixvim/main";
     nixvim.inputs.nixpkgs.follows = "nixpkgs";
 
     llm-agents.url = "github:numtide/llm-agents.nix";
