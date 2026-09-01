@@ -31,7 +31,13 @@ EXCLUDED_DIR_NAMES = {
     "result",
     "target",
 }
-ASSIGNMENT_RE = re.compile(r'(?:inputs\.)?nixpkgs\.url\s*=\s*"')
+DIRECT_URL_ASSIGNMENT_RE = re.compile(
+    r'(?:inputs\.)?(?P<name>[A-Za-z_][A-Za-z0-9_\-\']*)\.url\s*=\s*"'
+)
+GITHUB_INPUT_RE = re.compile(
+    r"github:(?P<owner>[^/?#]+)/(?P<repo>[^/?#]+)"
+    r"(?:/(?P<path_ref>[^?#]+)|\?ref=(?P<query_ref>[^&#]+))?"
+)
 GITHUB_NIXPKGS_RE = re.compile(
     r"github:(?P<owner>nixos)/nixpkgs"
     r"(?:/(?P<path_ref>[^?#]+)|\?ref=(?P<query_ref>[^&#]+))?",
@@ -39,6 +45,14 @@ GITHUB_NIXPKGS_RE = re.compile(
 )
 NIXOS_FLAKE_RE = re.compile(r"\b(?:nixosConfigurations|nixosSystem)\b")
 VALID_UNSTABLE_REFS = ("auto", "nixos-unstable", "nixpkgs-unstable")
+
+
+@dataclasses.dataclass(frozen=True)
+class DirectUrlAssignment:
+    name: str
+    url_start: int
+    url_end: int
+    url: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -168,9 +182,9 @@ def parse_supported_url(url: str) -> tuple[bool, str | None]:
     return True, match.group("path_ref") or match.group("query_ref")
 
 
-def find_nixpkgs_assignments(source: str) -> tuple[InputAssignment, ...]:
-    """Find direct nixpkgs.url assignments while ignoring comments and strings."""
-    assignments: list[InputAssignment] = []
+def find_direct_url_assignments(source: str) -> tuple[DirectUrlAssignment, ...]:
+    """Find direct input URL assignments while ignoring comments and strings."""
+    assignments: list[DirectUrlAssignment] = []
     index = 0
 
     while index < len(source):
@@ -188,22 +202,26 @@ def find_nixpkgs_assignments(source: str) -> tuple[InputAssignment, ...]:
             index = skip_double_quoted_string(source, index)
             continue
 
-        match = ASSIGNMENT_RE.match(source, index)
-        if match and (index == 0 or source[index - 1] not in ".-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"):
+        match = DIRECT_URL_ASSIGNMENT_RE.match(source, index)
+        valid_boundary = index == 0 or source[index - 1] not in (
+            ".-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+        )
+        if match and valid_boundary:
             url_start = match.end()
             quote_end = skip_double_quoted_string(source, url_start - 1) - 1
-            if quote_end < url_start or quote_end >= len(source):
+            if (
+                quote_end < url_start
+                or quote_end >= len(source)
+                or source[quote_end] != '"'
+            ):
                 index = len(source)
                 continue
-            url = source[url_start:quote_end]
-            supported, ref = parse_supported_url(url)
             assignments.append(
-                InputAssignment(
+                DirectUrlAssignment(
+                    name=match.group("name"),
                     url_start=url_start,
                     url_end=quote_end,
-                    url=url,
-                    ref=ref,
-                    supported=supported,
+                    url=source[url_start:quote_end],
                 )
             )
             index = quote_end + 1
@@ -211,6 +229,24 @@ def find_nixpkgs_assignments(source: str) -> tuple[InputAssignment, ...]:
 
         index += 1
 
+    return tuple(assignments)
+
+
+def find_nixpkgs_assignments(source: str) -> tuple[InputAssignment, ...]:
+    assignments: list[InputAssignment] = []
+    for direct in find_direct_url_assignments(source):
+        if direct.name != "nixpkgs":
+            continue
+        supported, ref = parse_supported_url(direct.url)
+        assignments.append(
+            InputAssignment(
+                url_start=direct.url_start,
+                url_end=direct.url_end,
+                url=direct.url,
+                ref=ref,
+                supported=supported,
+            )
+        )
     return tuple(assignments)
 
 
@@ -575,6 +611,117 @@ def tail(text: str, line_count: int = 12) -> str:
     return "\n".join(lines[-line_count:])
 
 
+def github_api_rate_limited(output: str) -> bool:
+    lowered = output.lower()
+    return "api.github.com" in lowered and "rate limit exceeded" in lowered
+
+
+def parse_github_input_url(url: str) -> tuple[str, str, str | None] | None:
+    match = GITHUB_INPUT_RE.fullmatch(url)
+    if not match:
+        return None
+    return (
+        match.group("owner"),
+        match.group("repo"),
+        match.group("path_ref") or match.group("query_ref"),
+    )
+
+
+def resolve_github_revision(
+    owner: str,
+    repo: str,
+    ref: str | None,
+    timeout: int,
+    cache: dict[tuple[str, str, str | None], str],
+) -> str:
+    key = (owner.lower(), repo.lower(), ref)
+    if key in cache:
+        return cache[key]
+    if ref and re.fullmatch(r"[0-9a-fA-F]{40}", ref):
+        cache[key] = ref.lower()
+        return cache[key]
+    if shutil.which("git") is None:
+        raise RuntimeError("git is unavailable for the GitHub rate-limit fallback")
+
+    remote = f"https://github.com/{owner}/{repo}.git"
+    if ref is None:
+        queries = ["HEAD"]
+        preferred_labels = ["HEAD"]
+    elif ref.startswith("refs/"):
+        queries = [ref, f"{ref}^{{}}"]
+        preferred_labels = [f"{ref}^{{}}", ref]
+    else:
+        queries = [
+            f"refs/heads/{ref}",
+            f"refs/tags/{ref}",
+            f"refs/tags/{ref}^{{}}",
+        ]
+        preferred_labels = [
+            f"refs/tags/{ref}^{{}}",
+            f"refs/heads/{ref}",
+            f"refs/tags/{ref}",
+        ]
+
+    environment = os.environ.copy()
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    completed = subprocess.run(
+        ["git", "ls-remote", remote, *queries],
+        check=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=min(timeout, 60),
+        env=environment,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"git exited {completed.returncode}"
+        raise RuntimeError(f"cannot resolve {owner}/{repo}: {detail}")
+
+    rows = [
+        tuple(line.split(maxsplit=1))
+        for line in completed.stdout.splitlines()
+        if line.strip()
+    ]
+    revision = next(
+        (
+            revision
+            for label in preferred_labels
+            for revision, actual_label in rows
+            if actual_label == label
+        ),
+        None,
+    )
+    if revision is None:
+        shown_ref = ref or "HEAD"
+        raise RuntimeError(f"cannot resolve {owner}/{repo} ref {shown_ref}")
+
+    cache[key] = revision
+    return revision
+
+
+def github_git_overrides(
+    source: str,
+    timeout: int,
+    cache: dict[tuple[str, str, str | None], str],
+) -> list[tuple[str, str]]:
+    overrides: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for assignment in find_direct_url_assignments(source):
+        parsed = parse_github_input_url(assignment.url)
+        if parsed is None or assignment.name in seen:
+            continue
+        owner, repo, ref = parsed
+        revision = resolve_github_revision(owner, repo, ref, timeout, cache)
+        overrides.append(
+            (assignment.name, f"github:{owner}/{repo}/{revision}")
+        )
+        seen.add(assignment.name)
+    if not overrides:
+        raise RuntimeError("no direct GitHub inputs were available for fallback")
+    return overrides
+
+
 def apply_fleet(
     *,
     root: Path,
@@ -583,6 +730,7 @@ def apply_fleet(
     timeout: int,
     fail_fast: bool,
     rewrite: bool,
+    github_git_fallback: bool,
 ) -> int:
     if shutil.which("nix") is None:
         print("error: nix is not available on PATH", file=sys.stderr)
@@ -598,6 +746,7 @@ def apply_fleet(
         "status": "running",
         "include_dirty": include_dirty,
         "rewrite": rewrite,
+        "github_git_fallback": github_git_fallback,
         "results": [],
     }
     write_json(report_path, report)
@@ -607,6 +756,7 @@ def apply_fleet(
     failures = 0
     skipped = 0
     successes = 0
+    github_revision_cache: dict[tuple[str, str, str | None], str] = {}
 
     for index, plan in enumerate(plans, start=1):
         candidate = plan.candidate
@@ -661,6 +811,8 @@ def apply_fleet(
         log_path = logs / safe_log_name(index, candidate, root)
         result["log"] = str(log_path)
 
+        used_git_fallback = False
+        active_command = command
         try:
             if rewrite and plan.needs_rewrite:
                 assert plan.rewritten_source is not None
@@ -672,7 +824,7 @@ def apply_fleet(
                 )
 
             completed = subprocess.run(
-                command,
+                active_command,
                 cwd=candidate.directory,
                 check=False,
                 stdin=subprocess.DEVNULL,
@@ -683,8 +835,53 @@ def apply_fleet(
             )
             output = completed.stdout
             log_path.write_text(
-                f"$ {shlex.join(command)}\n\n{output}", encoding="utf-8"
+                f"$ {shlex.join(active_command)}\n\n{output}", encoding="utf-8"
             )
+
+            if (
+                completed.returncode != 0
+                and github_git_fallback
+                and github_api_rate_limited(output)
+            ):
+                fallback_source = (
+                    plan.rewritten_source
+                    if rewrite and plan.needs_rewrite
+                    else candidate.source
+                )
+                assert fallback_source is not None
+                overrides = github_git_overrides(
+                    fallback_source, timeout, github_revision_cache
+                )
+                active_command = list(command)
+                for input_name, pinned_url in overrides:
+                    active_command.extend(
+                        ["--override-input", input_name, pinned_url]
+                    )
+                with log_path.open("a", encoding="utf-8") as log_handle:
+                    log_handle.write(
+                        "\n\n# GitHub API quota exhausted; retrying with "
+                        "Git-resolved revisions.\n"
+                        f"$ {shlex.join(active_command)}\n\n"
+                    )
+                completed = subprocess.run(
+                    active_command,
+                    cwd=candidate.directory,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=timeout,
+                )
+                output = completed.stdout
+                with log_path.open("a", encoding="utf-8") as log_handle:
+                    log_handle.write(output)
+                used_git_fallback = True
+                result["github_git_fallback"] = [
+                    {"input": input_name, "url": pinned_url}
+                    for input_name, pinned_url in overrides
+                ]
+
             if completed.returncode != 0:
                 raise RuntimeError(
                     f"nix flake update exited {completed.returncode}"
@@ -694,7 +891,7 @@ def apply_fleet(
             if isinstance(output, bytes):
                 output = output.decode(errors="replace")
             log_path.write_text(
-                f"$ {shlex.join(command)}\n\n{output}\n\nTIMEOUT after {timeout}s\n",
+                f"$ {shlex.join(active_command)}\n\n{output}\n\nTIMEOUT after {timeout}s\n",
                 encoding="utf-8",
             )
             restore_file(candidate.flake, flake_snapshot)
@@ -740,7 +937,8 @@ def apply_fleet(
         results.append(result)
         write_json(report_path, report)
         changed = " + unstable ref" if rewrite and plan.needs_rewrite else ""
-        print(f"{prefix} UPDATED  {shown}{changed}")
+        fallback = " [GitHub Git fallback]" if used_git_fallback else ""
+        print(f"{prefix} UPDATED  {shown}{changed}{fallback}")
 
     report.update(
         status="complete" if failures == 0 and skipped == 0 else "incomplete",
@@ -799,6 +997,14 @@ def add_apply_options(parser: argparse.ArgumentParser) -> None:
         "--fail-fast",
         action="store_true",
         help="stop after the first failure or skipped dirty candidate",
+    )
+    parser.add_argument(
+        "--no-github-git-fallback",
+        action="store_true",
+        help=(
+            "do not retry GitHub API rate-limit failures with revisions "
+            "resolved by git ls-remote"
+        ),
     )
 
 
@@ -884,6 +1090,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=args.timeout,
             fail_fast=args.fail_fast,
             rewrite=True,
+            github_git_fallback=not args.no_github_git_fallback,
         )
 
     if args.command == "update":
@@ -899,6 +1106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=args.timeout,
             fail_fast=args.fail_fast,
             rewrite=False,
+            github_git_fallback=not args.no_github_git_fallback,
         )
 
     raise AssertionError(f"unknown command: {args.command}")

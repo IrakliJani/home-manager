@@ -1,7 +1,7 @@
 ---
 name: nix-flake-fleet
 description: Finds Nix flake projects under ~/code, reports their nixpkgs channel and lock/Git state, moves direct nixpkgs inputs to an unstable branch, and runs nix flake update across the fleet with backups and failure isolation. Use when listing, auditing, or mass-updating personal Nix flake projects.
-compatibility: Python 3.9+, Nix 2.4+, macOS or Linux; Git is optional
+compatibility: Python 3.10+, Nix with `nix flake update --flake` (tested on 2.34.6), macOS or Linux; Git is optional except for the GitHub rate-limit fallback
 ---
 
 # Nix Flake Fleet
@@ -16,6 +16,7 @@ Use the bundled script to discover and update flakes under `~/code`. Discovery i
 - Rewrite only a direct `nixpkgs.url` or `inputs.nixpkgs.url` that points to `github:NixOS/nixpkgs`. Do not rewrite `follows`, similarly named inputs such as `nixpkgs-latest`, or unsupported URL forms automatically.
 - By default, skip a candidate when its `flake.nix` or `flake.lock` was already modified. Use `--include-dirty` only after reviewing those paths or when the user explicitly requests all candidates.
 - `sync` updates all lock inputs, not only `nixpkgs`. It does not build, deploy, activate, commit, push, delete Git changes, or garbage-collect.
+- If the GitHub API quota is exhausted, the script resolves direct GitHub refs with `git ls-remote` and retries with pinned overrides. Nix preserves the original unpinned input declarations in the lock.
 - A fleet update does not itself free Nix store space. Lock files are not GC roots. Handle generation deletion or garbage collection as a separate, explicitly approved task.
 - Do not include the Home Manager repository unless the user changes `--root`; the default root is only `~/code`.
 
@@ -92,7 +93,7 @@ Use the global `--only` option before the command to retry selected root-relativ
   sync --apply --include-dirty
 ```
 
-An unauthenticated GitHub API limit is 60 requests per hour and can interrupt a large run. Do not repeatedly rerun the whole fleet. Wait for the reset or configure a GitHub access token for Nix, then retry only failed paths.
+The unauthenticated GitHub API limit is 60 requests per hour. The default Git fallback handles direct `github:` input declarations without changing their lock-file origins. Disable it with `--no-github-git-fallback` only when requested. If a private repository or unsupported declaration still fails, do not repeatedly rerun the whole fleet: configure authentication or wait for the reset, then retry only failed paths.
 
 ## Lock-only update
 
