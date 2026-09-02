@@ -194,24 +194,33 @@ Use this flow when a reboot will kill every pane process but Herdr itself is not
 
 ### Prepare inside Herdr
 
-Confirm `HERDR_ENV=1`, inspect the live session as in step 1, then create a private bundle as in step 3. Name it for reboot recovery, for example:
+Confirm `HERDR_ENV=1`, inspect the live session as in step 1, then run the preparation helper from this skill directory:
 
 ```bash
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-BUNDLE="$HOME/.local/state/herdr/migrations/${STAMP}-HERDR_VERSION-reboot"
+"$SKILL_DIR/scripts/prepare-reboot.py"
 ```
 
-In `migration-config.json`, set `old_binary` and `new_binary` to the same absolute Nix store binary. Set both versions and both protocols identically. Use `["/usr/bin/true"]` for `switch_argv`; reboot recovery never executes it. Keep the real generation, profile, `HOME`, and `PATH` values so the binary remains rooted and resumed shells have the original command environment.
+Do not type a Herdr version, protocol, binary path, or bundle name manually. The helper:
 
-Prepare and inspect the bundle:
+- finds the process that owns the live socket and resolves its exact executable
+- derives the version from that executable and the protocol from the live server
+- refuses a binary/server mismatch
+- records the active Home Manager generation and a stable `PATH` without transient direct Nix store entries
+- creates mode-`0700` private bundle storage and explicit Nix GC roots
+- snapshots and validates the manifest, archives scrollback, and runs the isolated topology self-test
+- updates `~/.local/state/herdr/reboot-ready` only after every check passes
+
+The generated config intentionally pins the detected Nix store binary. This is captured recovery state, not a hardcoded version.
+
+Inspect the generated shortcut:
 
 ```bash
-"$BUNDLE/restore-after-reboot.py" prepare
+BUNDLE="$HOME/.local/state/herdr/reboot-ready"
 "$BUNDLE/restore-after-reboot.py" check
 cat "$BUNDLE/reboot-ready.json"
 ```
 
-`prepare` takes and validates the manifest, archives scrollback, backs up runtime files, and runs the isolated topology self-test. Require `prepared: true`, exact live counts, and no validation errors. Do not create, close, move, split, or relabel panes after preparation; if topology changes, run `prepare` again before rebooting.
+Require `prepared: true`, exact live counts, and no validation errors. Do not create, close, move, split, or relabel panes after preparation; if topology changes, run `prepare-reboot.py` again before rebooting.
 
 Get explicit approval before the user reboots. Do not install an automatic login job by default. Do not garbage-collect before recovery.
 
@@ -220,7 +229,7 @@ Get explicit approval before the user reboots. Do not install an automatic login
 Before opening Herdr, use Terminal or Ghostty outside Herdr:
 
 ```bash
-BUNDLE="$HOME/.local/state/herdr/migrations/TIMESTAMP-HERDR_VERSION-reboot"
+BUNDLE="$HOME/.local/state/herdr/reboot-ready"
 "$BUNDLE/restore-after-reboot.py" restore
 ```
 
@@ -230,8 +239,9 @@ Verify before using the restored session:
 
 ```bash
 cat "$BUNDLE/reboot-success.json"
-herdr status
-herdr session list --json
+HERDR_BIN=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["new_binary"])' "$BUNDLE/migration-config.json")
+"$HERDR_BIN" status
+"$HERDR_BIN" session list --json
 ```
 
 Require matching version/protocol, expected topology counts, and `process_health.ready: true`. Keep the private bundle until the user confirms every pane. Archived scrollback remains available in the bundle but is not injected into new terminals.

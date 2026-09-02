@@ -42,9 +42,26 @@ def validate_reboot_config(config: dict[str, object]) -> None:
             "reboot recovery requires identical source and target Herdr; "
             "use the protocol-upgrade cutover for version changes"
         )
+    if config.get("reboot_metadata_source") != "live-server":
+        raise RuntimeError(
+            "reboot metadata was not derived from the live server; "
+            "create the bundle with prepare-reboot.py"
+        )
     binary = Path(str(config["new_binary"]))
-    if not binary.is_file():
-        raise RuntimeError(f"Herdr binary is missing: {binary}")
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise RuntimeError(f"Herdr binary is missing or not executable: {binary}")
+    version_result = migration.run(
+        [str(binary), "--version"],
+        env=migration.clean_herdr_env(),
+        timeout=30,
+    )
+    actual_version = version_result.stdout.strip()
+    expected_version = f"herdr {config['new_version']}"
+    if actual_version != expected_version:
+        raise RuntimeError(
+            "captured Herdr binary version changed: "
+            f"expected {expected_version!r}, found {actual_version!r}"
+        )
 
 
 def current_ping(socket_path: str) -> dict[str, object] | None:

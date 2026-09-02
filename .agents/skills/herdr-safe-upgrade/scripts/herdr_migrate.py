@@ -9,13 +9,10 @@ import shlex
 import shutil
 import socket
 import subprocess
-import sys
-import tempfile
 import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
 
 BUNDLE = Path(__file__).resolve().parent
 CONFIG_PATH = BUNDLE / "migration-config.json"
@@ -65,6 +62,12 @@ def clean_herdr_env(base: dict[str, str] | None = None) -> dict[str, str]:
 
 def configured_env(config: dict[str, object]) -> dict[str, str]:
     env = clean_herdr_env()
+    for key in (
+        "__HM_SESS_VARS_SOURCED",
+        "__HM_ZSH_SESS_VARS_SOURCED",
+        "__NIX_DARWIN_SET_ENVIRONMENT_DONE",
+    ):
+        env.pop(key, None)
     env["HOME"] = str(config["home"])
     env["PATH"] = str(config["path"])
     return env
@@ -530,6 +533,10 @@ def snapshot(output: Path, archive_scrollback: bool) -> dict[str, object]:
         if not isinstance(socket_path, str) or not isinstance(session_dir, str):
             raise RuntimeError("running session lacks socket or directory")
         ping = api_request(socket_path, "ping", {})
+        if ping.get("version") != config["old_version"]:
+            raise RuntimeError(
+                f"source server version changed: expected {config['old_version']}, got {ping.get('version')}"
+            )
         if ping.get("protocol") != config["old_protocol"]:
             raise RuntimeError(
                 f"source server protocol changed: expected {config['old_protocol']}, got {ping.get('protocol')}"
