@@ -43,7 +43,10 @@ GITHUB_NIXPKGS_RE = re.compile(
     r"(?:/(?P<path_ref>[^?#]+)|\?ref=(?P<query_ref>[^&#]+))?",
     re.IGNORECASE,
 )
-NIXOS_FLAKE_RE = re.compile(r"\b(?:nixosConfigurations|nixosSystem)\b")
+NIX_IDENTIFIER_CHARS = frozenset(
+    "'-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+)
+NIXOS_OUTPUT_NAMES = ("nixosConfigurations", "nixosSystem")
 VALID_UNSTABLE_REFS = ("auto", "nixos-unstable", "nixpkgs-unstable")
 
 
@@ -250,6 +253,36 @@ def find_nixpkgs_assignments(source: str) -> tuple[InputAssignment, ...]:
     return tuple(assignments)
 
 
+def has_nix_code_name(source: str, names: Sequence[str]) -> bool:
+    """Find an identifier in Nix code while ignoring comments and strings."""
+    index = 0
+    while index < len(source):
+        if source[index] == "#":
+            newline = source.find("\n", index + 1)
+            index = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            index = skip_block_comment(source, index)
+            continue
+        if source.startswith("''", index):
+            index = skip_indented_string(source, index)
+            continue
+        if source[index] == '"':
+            index = skip_double_quoted_string(source, index)
+            continue
+
+        for name in names:
+            if not source.startswith(name, index):
+                continue
+            before = source[index - 1] if index else ""
+            end = index + len(name)
+            after = source[end] if end < len(source) else ""
+            if before not in NIX_IDENTIFIER_CHARS and after not in NIX_IDENTIFIER_CHARS:
+                return True
+        index += 1
+    return False
+
+
 def run_git(arguments: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(cwd), *arguments],
@@ -350,13 +383,17 @@ def filter_candidates(
 
 
 def is_unstable(ref: str | None) -> bool:
-    return ref is not None and "unstable" in ref.lower()
+    return ref is not None and ref.lower() in VALID_UNSTABLE_REFS[1:]
 
 
 def target_ref_for(source: str, requested: str) -> str:
     if requested != "auto":
         return requested
-    return "nixos-unstable" if NIXOS_FLAKE_RE.search(source) else "nixpkgs-unstable"
+    return (
+        "nixos-unstable"
+        if has_nix_code_name(source, NIXOS_OUTPUT_NAMES)
+        else "nixpkgs-unstable"
+    )
 
 
 def make_rewrite_plan(

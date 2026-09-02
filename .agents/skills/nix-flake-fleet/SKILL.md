@@ -88,8 +88,8 @@ Use the global `--only` option before the command to retry selected root-relativ
 
 ```bash
 "$FLEET" \
-  --only 'nixos-hetzner-metal-private' \
-  --only 'nixos-hetzner-metal-public' \
+  --only 'project-a' \
+  --only 'project-b' \
   sync --apply --include-dirty
 ```
 
