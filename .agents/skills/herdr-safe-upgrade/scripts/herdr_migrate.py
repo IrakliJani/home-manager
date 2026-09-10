@@ -225,7 +225,9 @@ def process_executable(pid: int) -> str | None:
     return None
 
 
-def select_root_process(process_info: dict[str, object]) -> dict[str, object] | None:
+def select_root_process(
+    process_info: dict[str, object], agent_kind: str | None = None
+) -> dict[str, object] | None:
     processes_value = process_info.get("foreground_processes", [])
     if not isinstance(processes_value, list) or not processes_value:
         return None
@@ -238,7 +240,9 @@ def select_root_process(process_info: dict[str, object]) -> dict[str, object] | 
                 return process
         for process in processes:
             if process.get("pid") == shell_pid:
-                return None
+                # A pane's original shell can be replaced by an agent via exec,
+                # leaving the live agent with the recorded shell PID.
+                return process if agent_kind else None
     candidate_pids = {
         process["pid"] for process in processes if isinstance(process.get("pid"), int)
     }
@@ -355,7 +359,12 @@ def resolve_pi_session(
         if len(matches) != 1:
             raise RuntimeError(f"Pi --session {explicit!r} resolved to {len(matches)} files")
         if detected is not None and detected.get("id") != matches[0].get("id"):
-            raise RuntimeError("Pi argv and detected session metadata disagree")
+            detected_created_at = detected.get("created_at")
+            if not isinstance(detected_created_at, str) or parse_iso(
+                detected_created_at
+            ) <= started_at:
+                raise RuntimeError("Pi argv and detected session metadata disagree")
+            return detected, "agent-session-created-after-process-start"
         return matches[0], "explicit-and-agent-session" if detected else "explicit"
 
     if detected is not None:
@@ -599,9 +608,10 @@ def snapshot(output: Path, archive_scrollback: bool) -> dict[str, object]:
             if not isinstance(process_info, dict):
                 raise RuntimeError(f"pane.process_info returned no data for {pane_id}")
             process_by_pane[pane_id] = process_info
-            root_process = select_root_process(process_info)
             agent = agent_by_pane.get(pane_id)
-            agent_kind = agent.get("agent") if isinstance(agent, dict) else None
+            agent_value = agent.get("agent") if isinstance(agent, dict) else None
+            agent_kind = agent_value if isinstance(agent_value, str) else None
+            root_process = select_root_process(process_info, agent_kind)
             pane_cwd = pane.get("foreground_cwd") or pane.get("cwd")
             if not isinstance(pane_cwd, str):
                 raise RuntimeError(f"pane {pane_id} has no cwd")
