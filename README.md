@@ -12,6 +12,8 @@ This flake exposes:
 - Explicit profile targets:
   - `irakli@darwin`
   - `irakli@linux`
+  - `base@darwin`
+  - `base@linux`
   - `claw@darwin`
   - `claw@linux`
 
@@ -58,7 +60,9 @@ home-manager.nixosModules.home-manager
 
 # in your host module
 home-manager.users.<user> = irakli-home.homeModules.linux {
-  profile = "irakli"; # or "claw"
+  profile = "base";
+  username = "service-user";
+  extraModules = [ ./service-user.nix ];
 };
 ```
 
@@ -66,3 +70,4 @@ home-manager.users.<user> = irakli-home.homeModules.linux {
 
 - Shared config lives in `profiles/_shared`.
 - Profile-specific overrides live under `profiles/<name>/`.
+- Consumers can extend any profile with `extraModules` and set its account identity with `username`.
