@@ -45,6 +45,10 @@ in
       "~/.orbstack/ssh/config"
       "~/.ssh/config.local"
     ];
+
+    # Scope forwarding to the two Mac SSH aliases, not every host.
+    # Exact Tailscale DNS/IP targets can go in the private config.local include.
+    settings."jani lightdash".ForwardAgent = "yes";
   };
 
   home.sessionVariablesExtra = lib.mkAfter ''
