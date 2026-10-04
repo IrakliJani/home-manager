@@ -11,9 +11,6 @@
     nixvim.inputs.nixpkgs.follows = "nixpkgs";
 
     llm-agents.url = "github:numtide/llm-agents.nix";
-
-    hunk.url = "github:modem-dev/hunk";
-    hunk.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -22,7 +19,6 @@
       home-manager,
       nixvim,
       llm-agents,
-      hunk,
       ...
     }:
     let
@@ -59,7 +55,6 @@
         {
           imports = [
             nixvim.homeModules.nixvim
-            hunk.homeManagerModules.default
             (mkProfileModule profile)
             (mkPlatformModule system)
           ];

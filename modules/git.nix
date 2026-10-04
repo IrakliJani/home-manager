@@ -18,12 +18,19 @@
 
       merge.conflictStyle = "zdiff3";
 
-      pager = {
-        branch = false;
-        diff = "hunk pager";
-        show = "hunk pager";
-        stash = "hunk pager";
-      };
+      pager.branch = false;
+    };
+  };
+
+  programs.delta = {
+    enable = true;
+    enableGitIntegration = true;
+    options = {
+      dark = true;
+      navigate = true;
+      side-by-side = false;
+      line-numbers = true;
+      hyperlinks = true;
     };
   };
 }

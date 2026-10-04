@@ -11,6 +11,8 @@
 
     shellAliases = {
       gs = "git status";
+      gd = "git -c delta.side-by-side=false diff";
+      gds = "git -c delta.side-by-side=true diff";
     };
 
     history = {

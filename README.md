@@ -62,6 +62,17 @@ home-manager.users.<user> = irakli-home.homeModules.linux {
 };
 ```
 
+## Git diffs
+
+Git diffs use Delta from the pinned `nixpkgs-unstable` input, with syntax highlighting
+and line numbers. Unified view is the default. Use `n` / `N` to navigate diff sections.
+
+Zsh shortcuts (view overrides apply only to that command):
+
+- `gd`: unified diff.
+- `gds`: side-by-side diff. Arguments work as usual, e.g. `gds --staged`.
+- For other Git commands, use `git -c delta.side-by-side=true show` (or `log -p`).
+
 ## Notes
 
 - Shared config lives in `profiles/_shared`.
