@@ -18,6 +18,10 @@ in
 {
   home.homeDirectory = "/Users/irakli";
 
+  # Temporary: Claude's system-only CA loader misses Apple's public roots.
+  # Remove once system-only trust works on macOS; keep certificate verification enabled.
+  home.sessionVariables.CLAUDE_CODE_CERT_STORE = "bundled,system";
+
   warnings = lib.optional (!ghosttyTerminfoSourceExists) ''
     Ghostty terminfo source is missing at modules/platform/ghostty.terminfo;
     xterm-ghostty will not be installed.
