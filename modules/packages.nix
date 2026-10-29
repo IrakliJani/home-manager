@@ -120,7 +120,7 @@ in
       nerd-fonts.jetbrains-mono
 
       # runtimes
-      nodejs
+      nodejs_26
       bun
       python3
     ];
