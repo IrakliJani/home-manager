@@ -11,6 +11,20 @@
     nixvim.inputs.nixpkgs.follows = "nixpkgs";
 
     llm-agents.url = "github:numtide/llm-agents.nix";
+
+    # Pinned: it runs at build time, so read the diff before moving it.
+    agent-skills.url = "github:Kyure-A/agent-skills-nix/93a02cb60eda167de8c5baa085e4a2bcfc71b885";
+    agent-skills.inputs.nixpkgs.follows = "nixpkgs";
+
+    cursor-plugins.url = "github:cursor/plugins";
+    cursor-plugins.flake = false;
+
+    mattpocock-skills.url = "github:mattpocock/skills";
+    mattpocock-skills.flake = false;
+
+    # Private: Irakli's own skills and AGENTS.md. Fetching it needs his SSH key.
+    irakli-skills.url = "git+ssh://git@github.com/IrakliJani/skills?ref=main";
+    irakli-skills.flake = false;
   };
 
   outputs =
@@ -19,6 +33,10 @@
       home-manager,
       nixvim,
       llm-agents,
+      agent-skills,
+      cursor-plugins,
+      mattpocock-skills,
+      irakli-skills,
       ...
     }:
     let
@@ -55,6 +73,16 @@
         {
           imports = [
             nixvim.homeModules.nixvim
+            agent-skills.homeManagerModules.default
+            {
+              programs.agent-skills.sources = {
+                cursor.path = cursor-plugins;
+                matt-engineering.path = mattpocock-skills;
+                matt-productivity.path = mattpocock-skills;
+              };
+              # Lazy: only profiles that import irakli-skills.nix fetch it.
+              _module.args.irakliSkills = irakli-skills;
+            }
             (mkProfileModule profile)
             (mkPlatformModule system)
           ];

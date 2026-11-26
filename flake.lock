@@ -1,5 +1,26 @@
 {
   "nodes": {
+    "agent-skills": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1794456227,
+        "narHash": "sha256-qu7S1arVl+Q6H/yZhJ2VdeDY/kBxY8mK8m6U49M0alk=",
+        "owner": "Kyure-A",
+        "repo": "agent-skills-nix",
+        "rev": "93a02cb60eda167de8c5baa085e4a2bcfc71b885",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Kyure-A",
+        "repo": "agent-skills-nix",
+        "rev": "93a02cb60eda167de8c5baa085e4a2bcfc71b885",
+        "type": "github"
+      }
+    },
     "bun2nix": {
       "inputs": {
         "flake-parts": [
@@ -31,6 +52,22 @@
         "owner": "Mic92",
         "ref": "llm-agents",
         "repo": "bun2nix",
+        "type": "github"
+      }
+    },
+    "cursor-plugins": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1795562224,
+        "narHash": "sha256-CRn8wNxmVQNq85FHrXBuKlrI+rs5W4p00awt7+XIy90=",
+        "owner": "cursor",
+        "repo": "plugins",
+        "rev": "41e400932eca14f289e7db717a70455256b6d388",
+        "type": "github"
+      },
+      "original": {
+        "owner": "cursor",
+        "repo": "plugins",
         "type": "github"
       }
     },
@@ -97,6 +134,23 @@
         "type": "github"
       }
     },
+    "irakli-skills": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1795700619,
+        "narHash": "sha256-Y5MPdH69/z0//x2qpXu7E+Smfr5Ov73+IsYXXJR4Pyc=",
+        "ref": "main",
+        "rev": "d954e84885e3b1c5a7aa6e09a1ae8d295c07a28f",
+        "revCount": 4,
+        "type": "git",
+        "url": "ssh://git@github.com/IrakliJani/skills"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "ssh://git@github.com/IrakliJani/skills"
+      }
+    },
     "llm-agents": {
       "inputs": {
         "bun2nix": "bun2nix",
@@ -116,6 +170,22 @@
       "original": {
         "owner": "numtide",
         "repo": "llm-agents.nix",
+        "type": "github"
+      }
+    },
+    "mattpocock-skills": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1795608503,
+        "narHash": "sha256-kM/OK6+kbTHzlN5d6wjL9hM80lolcSCoO8A1oRvEJEU=",
+        "owner": "mattpocock",
+        "repo": "skills",
+        "rev": "6f7f7831a625f040a8e06a0e7954826b87ce775a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "mattpocock",
+        "repo": "skills",
         "type": "github"
       }
     },
@@ -176,8 +246,12 @@
     },
     "root": {
       "inputs": {
+        "agent-skills": "agent-skills",
+        "cursor-plugins": "cursor-plugins",
         "home-manager": "home-manager",
+        "irakli-skills": "irakli-skills",
         "llm-agents": "llm-agents",
+        "mattpocock-skills": "mattpocock-skills",
         "nixpkgs": "nixpkgs_2",
         "nixvim": "nixvim"
       }
